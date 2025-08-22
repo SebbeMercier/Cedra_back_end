@@ -250,4 +250,56 @@ router.post("/debug/send-test", async (req, res) => {
   }
 });
 
+/* =========================
+   POST /api/company/users/:userId/reset-password
+   -> génère un MDP temporaire + email
+   ========================= */
+router.post("/users/:userId/reset-password", authMiddleware, companyAdminMiddleware, async (req, res) => {
+  try {
+    const targetUserId = Number(req.params.userId);
+    const company = await getPrimaryCompanyForUser(req.user.id);
+    if (!company) return res.status(404).json({ message: "Aucune société" });
+
+    // vérifie que le user appartient bien à la société
+    const [chk] = await pool.query(
+      "SELECT 1 FROM company_users WHERE companyId = ? AND userId = ? LIMIT 1",
+      [company.id, targetUserId]
+    );
+    if (chk.length === 0) return res.status(404).json({ message: "Utilisateur non lié à cette société" });
+
+    const tempPassword = generatePassword(12);
+    const hash = await bcrypt.hash(tempPassword, 10);
+    await pool.query("UPDATE users SET passwordHash = ? WHERE id = ?", [hash, targetUserId]);
+
+    // email
+    let emailSent = false, messageId = null, smtpResponse = null;
+    try {
+      const [u] = await pool.query("SELECT email FROM users WHERE id = ? LIMIT 1", [targetUserId]);
+      const to = u[0]?.email;
+      const t = createTransport();
+      const fromAddress = process.env.SMTP_FROM || process.env.SMTP_USER;
+
+      const info = await t.sendMail({
+        from: fromAddress,
+        to,
+        subject: "Réinitialisation de votre mot de passe Cedra",
+        text: `Bonjour,\n\nVotre mot de passe a été réinitialisé par un administrateur de la société ${company.name}.\n\nMot de passe temporaire : ${tempPassword}\n\nConnectez-vous et changez-le depuis votre profil.\n\nL’équipe Cedra`,
+        envelope: { from: fromAddress, to },
+      });
+
+      emailSent = true;
+      messageId = info.messageId;
+      smtpResponse = info.response;
+    } catch (mailErr) {
+      console.error("[RESET PASSWORD MAIL ERROR]:", mailErr);
+    }
+
+    res.json({ ok: true, emailSent, messageId, smtpResponse });
+  } catch (e) {
+    console.error("[COMPANY POST /users/:id/reset-password] ERROR:", e);
+    res.status(500).json({ message: "Erreur serveur" });
+  }
+});
+
+
 export default router;
