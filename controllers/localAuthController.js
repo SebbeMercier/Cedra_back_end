@@ -5,27 +5,26 @@ import { Argon2id } from "oslo/password";
 import { randomBytes } from "crypto";
 
 /**
- * Util: génère un id texte pour users.id
+ * Util: génère un id aléatoire hex (30 chars par défaut)
  */
 function genId(n = 15) {
-  return randomBytes(n).toString("hex"); // 30 chars
+  return randomBytes(n).toString("hex");
 }
 
 /**
  * POST /api/auth/signup
- * body: { name, email, password }
- * -> insère dans users (hashed_password, flags) puis crée une session Lucia
  */
 export const signup = async (req, res) => {
   try {
     const { name, email, password } = req.body ?? {};
     if (!name || !email || !password) {
-      return res.status(400).json({ message: "Champs requis: name, email, password" });
+      return res
+        .status(400)
+        .json({ message: "Champs requis: name, email, password" });
     }
 
     const lowerEmail = String(email).toLowerCase().trim();
 
-    // Vérifie si email déjà utilisé
     const exists = await pool.query(
       `SELECT 1 FROM users WHERE email = $1 LIMIT 1`,
       [lowerEmail]
@@ -45,12 +44,14 @@ export const signup = async (req, res) => {
       [userId, lowerEmail, name.trim(), hashed, false, false, "local"]
     );
 
-    // crée session Lucia (cookie HttpOnly)
+    // Crée la session Lucia et envoie le cookie via les helpers
     const session = await auth.createSession({
       userId,
-      attributes: {}, // tu peux y mettre des flags si besoin
+      attributes: {},
     });
-    auth.handleRequest(req, res).setSession(session);
+
+    const cookie = auth.createSessionCookie(session.id);
+    res.append("Set-Cookie", cookie.serialize());
 
     return res.status(201).json({ message: "Utilisateur créé avec succès" });
   } catch (err) {
@@ -61,8 +62,6 @@ export const signup = async (req, res) => {
 
 /**
  * POST /api/auth/login
- * body: { email, password }
- * -> lit user, vérifie hash, crée session
  */
 export const login = async (req, res) => {
   try {
@@ -90,11 +89,14 @@ export const login = async (req, res) => {
       return res.status(401).json({ message: "Identifiants invalides" });
     }
 
+    // Crée la session et envoie le cookie via les helpers Lucia
     const session = await auth.createSession({
       userId: u.id,
       attributes: {},
     });
-    auth.handleRequest(req, res).setSession(session);
+
+    const cookie = auth.createSessionCookie(session.id);
+    res.append("Set-Cookie", cookie.serialize());
 
     return res.json({ message: "Connexion réussie" });
   } catch (err) {
@@ -105,16 +107,29 @@ export const login = async (req, res) => {
 
 /**
  * POST /api/auth/logout
- * -> invalide la session et supprime le cookie
  */
 export const logout = async (req, res) => {
   try {
-    const request = auth.handleRequest(req, res);
-    const session = await request.validate();
-    if (session) {
-      await auth.invalidateSession(session.sessionId);
-      request.setSession(null);
+    // Récupère l'id de session depuis le cookie
+    const raw = req.headers.cookie || "";
+    const found = raw
+      .split(";")
+      .map((c) => c.trim())
+      .find((c) => c.startsWith("auth_session="));
+    const sessionId = found ? decodeURIComponent(found.split("=", 2)[1]) : null;
+
+    if (sessionId) {
+      try {
+        await auth.invalidateSession(sessionId);
+      } catch (_) {
+        // session déjà invalide: on ignore
+      }
     }
+
+    // Envoie un cookie "blank" via Lucia pour purger côté client
+    const blank = auth.createBlankSessionCookie();
+    res.append("Set-Cookie", blank.serialize());
+
     return res.json({ message: "Déconnecté" });
   } catch (err) {
     console.error("LOGOUT ERROR:", err);
