@@ -4,7 +4,6 @@ import pool from "../config/db.js";
 
 /**
  * Récupère l'id de session depuis les cookies de la requête.
- * (cookie-parser monté dans server.js)
  */
 function getSessionIdFromReq(req) {
   if (req.cookies?.auth_session) return req.cookies.auth_session;
@@ -18,55 +17,48 @@ function getSessionIdFromReq(req) {
 }
 
 /**
- * Middleware d'auth OBLIGATOIRE.
- * - Lit le cookie "auth_session"
- * - Valide via Lucia
- * - Hydrate req.session et req.userId
- * - Gère la rotation du cookie quand session.fresh === true
+ * Supprime le cookie auth côté client (cookie "blanc")
+ */
+function purgeSessionCookie(res) {
+  const blank = auth.createBlankSessionCookie();
+  res.append("Set-Cookie", blank.serialize());
+}
+
+/**
+ * Auth obligatoire : bloque si non connecté
  */
 export const authMiddleware = async (req, res, next) => {
   try {
     const sid = getSessionIdFromReq(req);
-    if (!sid) {
-      req.session = null;
-      req.userId = null;
-      return res.status(401).json({ message: "Non authentifié" });
-    }
+    if (!sid) return deny(res, 401, "Non authentifié");
 
     const { session, user } = await auth.validateSession(sid);
 
     if (!session) {
-      // Purge côté client si la session est invalide
-      const blank = auth.createBlankSessionCookie();
-      res.append("Set-Cookie", blank.serialize());
-      req.session = null;
-      req.userId = null;
-      return res.status(401).json({ message: "Session invalide" });
+      purgeSessionCookie(res);
+      return deny(res, 401, "Session invalide");
     }
 
-    // Rotation recommandée par Lucia quand session.fresh === true
     if (session.fresh) {
       const cookie = auth.createSessionCookie(session.id);
       res.append("Set-Cookie", cookie.serialize());
     }
 
-    req.session = session; // { id, userId, expiresAt, fresh, attributes? }
+    // Injection dans req
+    req.session = session;
     req.userId = session.userId;
-    req.authUser = user ?? null; // si tu veux l'exposer
+    req.authUser = await getFullUser(session.userId);
 
     return next();
   } catch (e) {
     console.error("AUTH MIDDLEWARE ERROR:", e);
-    const blank = auth.createBlankSessionCookie();
-    res.append("Set-Cookie", blank.serialize());
-    return res.status(401).json({ message: "Authentification requise" });
+    purgeSessionCookie(res);
+    return deny(res, 401, "Authentification requise");
   }
 };
 
 /**
- * Middleware d'auth OPTIONNELLE.
- * - Pas de cookie: continue sans session
- * - Cookie invalide: purge et continue sans session
+ * Auth facultative : continue même si la session est absente ou invalide
  */
 export const optionalAuth = async (req, res, next) => {
   try {
@@ -76,10 +68,7 @@ export const optionalAuth = async (req, res, next) => {
     const { session, user } = await auth.validateSession(sid);
 
     if (!session) {
-      const blank = auth.createBlankSessionCookie();
-      res.append("Set-Cookie", blank.serialize());
-      req.session = null;
-      req.userId = null;
+      purgeSessionCookie(res);
       return next();
     }
 
@@ -90,28 +79,20 @@ export const optionalAuth = async (req, res, next) => {
 
     req.session = session;
     req.userId = session.userId;
-    req.authUser = user ?? null;
+    req.authUser = await getFullUser(session.userId);
 
     return next();
   } catch {
-    // on passe en invité en cas d'erreur
-    return next();
+    return next(); // invité silencieux
   }
 };
 
 /**
- * Rafraîchit la session si elle expire bientôt (ex: < 7 jours).
- * - Crée une NOUVELLE session, invalide l'ancienne,
- *   remplace le cookie.
- *
- * Remarque: ceci est optionnel. Lucia gère déjà la rotation via session.fresh.
- * Garde-le si tu veux une "extension" proactive à J-7.
+ * Rafraîchit la session si elle expire bientôt (< 7 jours)
  */
 export const refreshSessionIfNeeded = async (req, res, next) => {
   try {
-    if (!req.session || !req.session.expiresAt) {
-      return next();
-    }
+    if (!req.session?.expiresAt) return next();
 
     const expMs = new Date(req.session.expiresAt).getTime();
     if (!Number.isFinite(expMs)) return next();
@@ -119,118 +100,96 @@ export const refreshSessionIfNeeded = async (req, res, next) => {
     const now = Date.now();
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
 
-    // Si > 7 jours restants, on ne rafraîchit pas
-    if (expMs - now > sevenDays) {
-      return next();
-    }
+    if (expMs - now > sevenDays) return next();
 
-    // Proactif: créer une nouvelle session
     const newSession = await auth.createSession({
       userId: req.session.userId,
       attributes: req.session.attributes || {},
     });
 
-    // Invalide l'ancienne (best effort)
     try {
       await auth.invalidateSession(req.session.id);
     } catch (_) {}
 
-    // Émet le nouveau cookie via les helpers Lucia
     const cookie = auth.createSessionCookie(newSession.id);
     res.append("Set-Cookie", cookie.serialize());
 
-    // Remplace en mémoire
     req.session = newSession;
     req.userId = newSession.userId;
 
     return next();
   } catch {
-    // en cas d’erreur de refresh, on ne bloque pas la requête
-    return next();
+    return next(); // ne bloque jamais
   }
 };
 
 /**
- * Vérifie le flag admin depuis la base (users.is_admin)
+ * Middleware admin global
  */
 export const requireAdmin = async (req, res, next) => {
-  try {
-    if (!req.session) return res.status(401).json({ message: "Non authentifié" });
-
-    const r = await pool.query(
-      `SELECT is_admin AS "isAdmin" FROM users WHERE id = $1 LIMIT 1`,
-      [req.session.userId]
-    );
-    if (r.rowCount === 0) return res.status(403).json({ message: "Accès refusé" });
-    if (!r.rows[0].isAdmin) return res.status(403).json({ message: "Accès admin requis" });
-
-    return next();
-  } catch (e) {
-    console.error("ADMIN CHECK ERROR:", e);
-    return res.status(500).json({ message: "Erreur serveur" });
-  }
+  if (!req.authUser) return deny(res, 401, "Non authentifié");
+  if (!req.authUser.isAdmin) return deny(res, 403, "Accès admin requis");
+  return next();
 };
 
 /**
- * Vérifie admin d’entreprise (company_users.role='admin') ou admin global.
+ * Middleware admin global OU admin d'entreprise
  */
 export const requireCompanyAdmin = async (req, res, next) => {
+  if (!req.authUser) return deny(res, 401, "Non authentifié");
+
+  if (req.authUser.isAdmin || req.authUser.isCompanyAdmin) {
+    return next();
+  }
+
+  return deny(res, 403, "Accès administrateur d’entreprise requis");
+};
+
+/**
+ * Charge les données complètes de l'utilisateur
+ */
+async function getFullUser(userId) {
   try {
-    if (!req.session) return res.status(401).json({ message: "Non authentifié" });
-
-    const userId = req.session.userId;
-
-    // admin global ?
-    const g = await pool.query(
-      `SELECT is_admin AS "isAdmin" FROM users WHERE id = $1 LIMIT 1`,
-      [userId]
-    );
-    if (g.rows[0]?.isAdmin) return next();
-
-    // admin d'entreprise ?
-    const c = await pool.query(
+    const r = await pool.query(
       `
-      SELECT 1
-      FROM company_users
-      WHERE "userId" = $1 AND LOWER(TRIM(role)) = 'admin'
+      SELECT 
+        u.id,
+        u.email,
+        u.name,
+        u.is_admin AS "isAdmin",
+        u.is_suspended AS "isSuspended",
+        CASE 
+          WHEN cu.role ILIKE 'admin' THEN TRUE
+          ELSE FALSE
+        END AS "isCompanyAdmin"
+      FROM users u
+      LEFT JOIN company_users cu ON cu."userId" = u.id
+      WHERE u.id = $1
       LIMIT 1
       `,
       [userId]
     );
-    if (c.rowCount === 0) {
-      return res
-        .status(403)
-        .json({ message: "Accès administrateur d’entreprise requis" });
-    }
 
-    return next();
+    if (r.rowCount === 0) return null;
+
+    const u = r.rows[0];
+    return {
+      userId: u.id,
+      email: u.email,
+      name: u.name,
+      isAdmin: !!u.isAdmin,
+      isSuspended: !!u.isSuspended,
+      isCompanyAdmin: !!u.isCompanyAdmin,
+    };
   } catch (e) {
-    console.error("COMPANY ADMIN CHECK ERROR:", e);
-    return res.status(500).json({ message: "Erreur serveur" });
+    console.error("GET FULL USER ERROR:", e);
+    return null;
   }
-};
+}
 
 /**
- * Récupère un "profil" rapide depuis la session (enrichi via DB)
+ * Standardise les réponses d'erreur
  */
-export const getUserFromSession = async (req) => {
-  if (!req.session) return null;
-  const userId = req.session.userId;
-
-  const r = await pool.query(
-    `SELECT id, email, name, is_admin AS "isAdmin", is_suspended AS "isSuspended"
-     FROM users WHERE id = $1 LIMIT 1`,
-    [userId]
-  );
-  if (r.rowCount === 0) return { userId };
-
-  const u = r.rows[0];
-  return {
-    supertokensUserId: null, // legacy placeholder si tu réutilises d'anciens champs
-    userId: u.id,
-    email: u.email,
-    name: u.name,
-    isAdmin: !!u.isAdmin,
-    isSuspended: !!u.isSuspended,
-  };
-};
+function deny(res, status = 403, message = "Accès refusé") {
+  return res.status(status).json({ error: "AUTH_ERROR", message });
+}
