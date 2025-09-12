@@ -1,6 +1,6 @@
 // middleware/authMiddleware.js
-import { auth } from "../config/lucia.js";
-import pool from "../config/db.js";
+import { auth } from "../config/auth.js";
+import { pool } from "../config/db.js";
 
 /**
  * Récupère l'id de session depuis les cookies de la requête.

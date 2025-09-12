@@ -3,7 +3,9 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import dotenv from "dotenv";
 
-import authRoutes from "./routes/auth.js";
+import { auth } from "./config/auth.js";
+import { createAuthRouter } from "better-auth";  // ✅ le bon import
+
 import productsRoutes from "./routes/products.js";
 import categoriesRoutes from "./routes/categories.js";
 import addressesRoutes from "./routes/addresses.js";
@@ -22,7 +24,9 @@ app.use(cors({
 app.use(cookieParser());
 app.use(express.json());
 
-app.use("/api/auth", authRoutes);
+// ⚡ Brancher Better Auth
+app.use("/api/auth", createAuthRouter(auth));
+
 app.use("/api/products", productsRoutes);
 app.use("/api/uploads", express.static("uploads"));
 app.use("/api/categories", categoriesRoutes);

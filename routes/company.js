@@ -2,7 +2,7 @@ import express from "express";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import pool from "../config/db.js";
+import { pool } from "../config/db.js";
 import { authMiddleware } from "../middleware/authMiddleware.js";
 import companyAdminMiddleware from "../middleware/companyAdminMiddleware.js";
 

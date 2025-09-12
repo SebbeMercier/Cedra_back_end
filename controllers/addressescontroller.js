@@ -1,5 +1,5 @@
 // controllers/addressescontroller.js
-import pool from "../config/db.js";
+import { pool } from "../config/db.js";
 
 /**
  * GET /api/addresses/mine

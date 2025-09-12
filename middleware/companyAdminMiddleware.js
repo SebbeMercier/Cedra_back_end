@@ -1,5 +1,5 @@
 // middleware/companyAdminMiddleware.js
-import pool from "../config/db.js";
+import { pool } from "../config/db.js";
 
 export default async function companyAdminMiddleware(req, res, next) {
   try {
