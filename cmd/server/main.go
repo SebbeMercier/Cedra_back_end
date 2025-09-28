@@ -24,7 +24,8 @@ const providerKey ctxKey = "provider"
 
 func main() {
 	config.Load()
-	database.Connect()
+	database.ConnectMongo()
+
 
 	// Init Goth providers
 	goth.UseProviders(

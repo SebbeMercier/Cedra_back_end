@@ -1,47 +1,45 @@
 package database
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
 
-	"cedra_back_end/internal/models"
-
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var DB *gorm.DB
+var (
+	MongoAuthDB    *mongo.Database
+	MongoCatalogDB *mongo.Database
+	MongoOrdersDB  *mongo.Database
+)
 
-func Connect() {
-	dsn := os.Getenv("DB_URL")
-	if dsn == "" {
-		log.Fatal("❌ DB_URL manquant dans .env")
-	}
+func ConnectMongo() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-	})
+	// DB Auth
+	clientAuth, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_AUTH_URL")))
 	if err != nil {
-		log.Fatal("❌ Impossible de se connecter à PostgreSQL:", err)
+		log.Fatal("❌ Erreur connexion Mongo AUTH:", err)
 	}
+	MongoAuthDB = clientAuth.Database("db_auth")
 
-	sqlDB, err := db.DB()
+	// DB Catalog
+	clientCatalog, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_CATALOG_URL")))
 	if err != nil {
-		log.Fatal("❌ Erreur lors de la récupération du pool DB:", err)
+		log.Fatal("❌ Erreur connexion Mongo CATALOG:", err)
 	}
+	MongoCatalogDB = clientCatalog.Database("db_catalog")
 
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(25)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-
-	DB = db
-
-	log.Println("✅ Connecté à PostgreSQL")
-
-	// ✅ bien utiliser le modèle importé
-	if err := DB.AutoMigrate(&models.User{}); err != nil {
-		log.Fatalf("❌ Erreur migration: %v", err)
+	// DB Orders
+	clientOrders, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_ORDERS_URL")))
+	if err != nil {
+		log.Fatal("❌ Erreur connexion Mongo ORDERS:", err)
 	}
+	MongoOrdersDB = clientOrders.Database("db_orders")
+
+	log.Println("✅ Connecté à MongoDB")
 }
