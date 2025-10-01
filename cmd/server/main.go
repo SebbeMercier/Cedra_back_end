@@ -21,7 +21,6 @@ import (
 func main() {
 	config.Load()
 	database.ConnectMongo()
-	log.Println("SESSION_SECRET:", os.Getenv("SESSION_SECRET"))
 
 
 	// ✅ Enregistre les providers OAuth
@@ -41,9 +40,9 @@ func main() {
 			os.Getenv("APPLE_CLIENT_ID"),
 			os.Getenv("APPLE_TEAM_ID"),
 			os.Getenv("APPLE_KEY_ID"),
-			http.DefaultClient,                            // ⬅️ Le *http.Client est maintenant en 4ème position
-			os.Getenv("APPLE_PRIVATE_KEY"),              // ⬅️ La clé privée (string) est en 5ème position
-			"http://localhost:8080/auth/apple/callback", // ⬅️ L'URL de rappel (string) est en 6ème position
+			http.DefaultClient,                           
+			os.Getenv("APPLE_PRIVATE_KEY"),             
+			"http://localhost:8080/auth/apple/callback",
 			"email", "name"),
 			)
 

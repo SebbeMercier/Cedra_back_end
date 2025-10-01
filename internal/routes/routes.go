@@ -8,20 +8,28 @@ import (
 )
 
 func RegisterRoutes(r *gin.Engine) {
-	// Groupement des routes d’auth sous /api/auth
+	// --- AUTH ---
 	auth := r.Group("/api/auth")
 	{
-		// Auth classique
 		auth.POST("/register", handlers.CreateUser)
 		auth.POST("/login", handlers.Login)
 
-		// OAuth (Google / Facebook / Apple)
+		// OAuth
 		auth.GET("/:provider", handlers.BeginAuth)
 		auth.GET("/:provider/callback", handlers.CallbackAuth)
 
-		// ✅ Routes protégées par JWT
 		protected := auth.Group("/")
 		protected.Use(middleware.AuthRequired())
 		protected.GET("/me", handlers.Me)
+	}
+
+	// --- ADDRESSES ---
+	addresses := r.Group("/api/addresses")
+	addresses.Use(middleware.AuthRequired()) // ⚡ Protégé par JWT
+	{
+		addresses.GET("/mine", handlers.ListMyAddresses)   // GET mes adresses
+		addresses.POST("", handlers.CreateAddress)         // POST nouvelle adresse
+		addresses.DELETE("/:id", handlers.DeleteAddress)   // DELETE une adresse
+		addresses.POST("/:id/default", handlers.MakeDefaultAddress) // POST définir par défaut
 	}
 }

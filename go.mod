@@ -10,7 +10,6 @@ require (
 	github.com/markbates/goth v1.82.0
 	go.mongodb.org/mongo-driver v1.17.4
 	golang.org/x/crypto v0.42.0
-	golang.org/x/oauth2 v0.31.0
 )
 
 require (
@@ -60,6 +59,7 @@ require (
 	golang.org/x/arch v0.20.0 // indirect
 	golang.org/x/mod v0.27.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
+	golang.org/x/oauth2 v0.31.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
