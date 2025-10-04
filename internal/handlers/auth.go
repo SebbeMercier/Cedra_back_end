@@ -26,68 +26,110 @@ const providerKey ctxKey = "provider"
 // ================== AUTH LOCALE ==================
 
 func CreateUser(c *gin.Context) {
-    var input struct {
-        Name           string `json:"name"`
-        Email          string `json:"email"`
-        Password       string `json:"password"`
-        IsCompanyAdmin bool   `json:"isCompanyAdmin"`
-    }
+	var input struct {
+		Name              string `json:"name"`
+		Email             string `json:"email"`
+		Password          string `json:"password"`
+		IsCompanyAdmin    bool   `json:"isCompanyAdmin"`
+		CompanyName       string `json:"companyName"`
+		BillingStreet     string `json:"billingStreet"`
+		BillingPostalCode string `json:"billingPostalCode"`
+		BillingCity       string `json:"billingCity"`
+		BillingCountry    string `json:"billingCountry"`
+	}
 
-    if err := c.ShouldBindJSON(&input); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-    // ⚡ Vérifier si l'email existe déjà
-    var existing models.User
-    err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-        "email": input.Email,
-        "provider": "local",
-    }).Decode(&existing)
+	// Vérifier si l'email existe déjà
+	var existing models.User
+	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
+		"email":    input.Email,
+		"provider": "local",
+	}).Decode(&existing)
 
-    if err == nil {
-    // utilisateur trouvé → doublon
-    c.JSON(http.StatusConflict, gin.H{
-        "error": "Un compte avec cet email existe déjà",
-        "email": input.Email,
-    })
-    return
-}
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "Un compte avec cet email existe déjà",
+			"email": input.Email,
+		})
+		return
+	}
 
-    // ✅ hash password
-    hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur hash mot de passe"})
-        return
-    }
+	// Hash password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur hash mot de passe"})
+		return
+	}
 
-    // Toujours customer → isCompanyAdmin est juste un flag
-    newUser := models.User{
-        ID:             primitive.NewObjectID(),
-        Name:           input.Name,
-        Email:          input.Email,
-        Password:       string(hashedPassword),
-        Role:           "customer",
-        IsCompanyAdmin: input.IsCompanyAdmin,
-        Provider:       "local",
-        CreatedAt:      primitive.NewDateTimeFromTime(time.Now()),
-    }
+	var companyID *string
 
-    _, err = database.MongoAuthDB.Collection("users").InsertOne(ctx, newUser)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-        return
-    }
+	// Si admin société, créer l'entreprise
+	if input.IsCompanyAdmin {
+		// Validation des champs requis
+		if input.CompanyName == "" || input.BillingStreet == "" ||
+			input.BillingPostalCode == "" || input.BillingCity == "" ||
+			input.BillingCountry == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Tous les champs de facturation sont requis pour un compte société",
+			})
+			return
+		}
 
-    c.JSON(http.StatusCreated, gin.H{
-        "id":             newUser.ID.Hex(),
-        "email":          newUser.Email,
-        "role":           newUser.Role,
-        "isCompanyAdmin": newUser.IsCompanyAdmin,
-    })
+		// Créer la société
+		company := bson.M{
+			"name":              input.CompanyName,
+			"billingStreet":     input.BillingStreet,
+			"billingPostalCode": input.BillingPostalCode,
+			"billingCity":       input.BillingCity,
+			"billingCountry":    input.BillingCountry,
+			"createdAt":         primitive.NewDateTimeFromTime(time.Now()),
+		}
+
+		result, err := database.MongoCompanyDB.Collection("companies").InsertOne(ctx, company)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la création de la société"})
+			return
+		}
+
+		companyIDHex := result.InsertedID.(primitive.ObjectID).Hex()
+		companyID = &companyIDHex
+	}
+
+	// Créer l'utilisateur
+	newUser := models.User{
+		ID:             primitive.NewObjectID(),
+		Name:           input.Name,
+		Email:          input.Email,
+		Password:       string(hashedPassword),
+		Role:           "customer",
+		IsCompanyAdmin: input.IsCompanyAdmin,
+		Provider:       "local",
+	}
+
+	if companyID != nil {
+		newUser.CompanyID = companyID
+	}
+
+	_, err = database.MongoAuthDB.Collection("users").InsertOne(ctx, newUser)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":             newUser.ID.Hex(),
+		"email":          newUser.Email,
+		"role":           newUser.Role,
+		"isCompanyAdmin": newUser.IsCompanyAdmin,
+		"companyId":      companyID,
+	})
 }
 
 func Login(c *gin.Context) {
@@ -120,13 +162,35 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	// Récupérer les infos de la société si applicable
+	var companyName *string
+	if user.CompanyID != nil && *user.CompanyID != "" {
+		var company struct {
+			Name string `bson:"name"`
+		}
+
+		companyOID, err := primitive.ObjectIDFromHex(*user.CompanyID)
+		if err == nil {
+			err := database.MongoCompanyDB.Collection("companies").FindOne(
+				ctx,
+				bson.M{"_id": companyOID},
+			).Decode(&company)
+
+			if err == nil {
+				companyName = &company.Name
+			}
+		}
+	}
+
 	token := generateJWT(user)
 	c.JSON(http.StatusOK, gin.H{
 		"token":          token,
 		"userId":         user.ID.Hex(),
-		"name":           user.Name, // ✅ renvoie aussi le nom
+		"name":           user.Name,
 		"email":          user.Email,
 		"role":           user.Role,
+		"companyId":      user.CompanyID,
+		"companyName":    companyName,
 		"isCompanyAdmin": user.IsCompanyAdmin,
 	})
 }
@@ -174,15 +238,14 @@ func CallbackAuth(c *gin.Context) {
 	}).Decode(&user)
 
 	if err != nil {
-		// Création d’un nouvel utilisateur social
+		// Création d'un nouvel utilisateur social
 		user = models.User{
 			ID:         primitive.NewObjectID(),
 			Email:      userInfo.Email,
-			Name:       userInfo.Name, // ✅ nom récupéré du provider si dispo
+			Name:       userInfo.Name,
 			Provider:   provider,
 			ProviderID: userInfo.UserID,
 			Role:       "customer",
-			CreatedAt:  primitive.NewDateTimeFromTime(time.Now()),
 		}
 		_, err := database.MongoAuthDB.Collection("users").InsertOne(ctx, user)
 		if err != nil {
@@ -196,7 +259,7 @@ func CallbackAuth(c *gin.Context) {
 		"token":    token,
 		"provider": provider,
 		"email":    user.Email,
-		"name":     user.Name, // ✅ renvoie aussi le nom
+		"name":     user.Name,
 		"role":     user.Role,
 	})
 }
@@ -215,6 +278,7 @@ func generateJWT(user models.User) string {
 	tokenString, _ := token.SignedString(jwtSecret)
 	return tokenString
 }
+
 func Me(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	email, _ := c.Get("email")
@@ -226,8 +290,7 @@ func Me(c *gin.Context) {
 		"user_id":        userID,
 		"email":          email,
 		"role":           role,
-		"name":           name, // ✅ renvoie le nom dans /me
+		"name":           name,
 		"isCompanyAdmin": isCompanyAdmin,
 	})
 }
-

@@ -25,11 +25,33 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// --- ADDRESSES ---
 	addresses := r.Group("/api/addresses")
-	addresses.Use(middleware.AuthRequired()) // ⚡ Protégé par JWT
+	addresses.Use(middleware.AuthRequired())
 	{
-		addresses.GET("/mine", handlers.ListMyAddresses)   // GET mes adresses
-		addresses.POST("", handlers.CreateAddress)         // POST nouvelle adresse
-		addresses.DELETE("/:id", handlers.DeleteAddress)   // DELETE une adresse
-		addresses.POST("/:id/default", handlers.MakeDefaultAddress) // POST définir par défaut
+		addresses.GET("/mine", handlers.ListMyAddresses)
+		addresses.POST("", handlers.CreateAddress)
+		addresses.DELETE("/:id", handlers.DeleteAddress)
+		addresses.POST("/:id/default", handlers.MakeDefaultAddress)
+	}
+
+	// --- COMPANY ---
+	company := r.Group("/api/company")
+	company.Use(middleware.AuthRequired())
+	{
+		// Infos de la société
+		company.GET("/me", handlers.GetMyCompany)
+
+		// Gestion de la société (admin uniquement)
+		admin := company.Group("/")
+		admin.Use(middleware.CompanyAdminRequired())
+		{
+			// Adresse de facturation
+			admin.PUT("/billing", handlers.UpdateCompanyBilling)
+			
+			// Gestion des employés
+			admin.GET("/employees", handlers.ListCompanyEmployees)
+			admin.POST("/employees", handlers.AddCompanyEmployee)
+			admin.DELETE("/employees/:userId", handlers.RemoveCompanyEmployee)
+			admin.PUT("/employees/:userId/admin", handlers.ToggleEmployeeAdmin)
+		}
 	}
 }
