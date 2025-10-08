@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"time"
-
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
 
@@ -21,7 +20,12 @@ func ListMyAddresses(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cursor, err := col.Find(ctx, bson.M{"userId": userID})
+	filter := bson.M{
+		"userId": userID,
+		"type": bson.M{"$ne": "billing"}, // ❌ exclut les adresses de facturation
+	}
+
+	cursor, err := col.Find(ctx, filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur de lecture"})
 		return
@@ -40,19 +44,17 @@ func ListMyAddresses(c *gin.Context) {
 // POST /api/addresses
 func CreateAddress(c *gin.Context) {
 	userID := c.GetString("user_id")
-	
-	// Vérifier que la DB est connectée
-	if database.MongoAddressesDB == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Base de données non connectée"})
-		return
-	}
-	
 	col := database.MongoAddressesDB.Collection("addresses")
 
 	var input models.Address
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"message": "Données invalides", "error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"message": "Données invalides"})
 		return
+	}
+
+	// Valeur par défaut si le front ne précise pas le type
+	if input.Type == "" {
+		input.Type = "user"
 	}
 
 	input.ID = primitive.NewObjectID()
@@ -62,32 +64,23 @@ func CreateAddress(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := col.InsertOne(ctx, input)
+	_, err := col.InsertOne(ctx, input)
 	if err != nil {
-		// Log l'erreur complète dans la console ET dans la réponse
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"message": "Impossible d'ajouter l'adresse", 
-			"error": err.Error(),
-			"userID": userID,
-			"hasDB": database.MongoAddressesDB != nil,
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Impossible d'ajouter l'adresse"})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Adresse créée",
-		"id": result.InsertedID,
 		"address": input,
 	})
 }
 
-// POST /api/addresses/:id/default
 func MakeDefaultAddress(c *gin.Context) {
 	idParam := c.Param("id")
 	userID := c.GetString("user_id")
 	col := database.MongoAddressesDB.Collection("addresses")
 
-	// Convertir l'ID string en ObjectID
 	objectID, err := primitive.ObjectIDFromHex(idParam)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "ID invalide"})
@@ -101,7 +94,11 @@ func MakeDefaultAddress(c *gin.Context) {
 	_, _ = col.UpdateMany(ctx, bson.M{"userId": userID}, bson.M{"$set": bson.M{"isDefault": false}})
 
 	// Activer celui-ci
-	result, err := col.UpdateOne(ctx, bson.M{"_id": objectID, "userId": userID}, bson.M{"$set": bson.M{"isDefault": true}})
+	result, err := col.UpdateOne(ctx,
+		bson.M{"_id": objectID, "userId": userID},
+		bson.M{"$set": bson.M{"isDefault": true}},
+	)
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Impossible de définir par défaut"})
 		return

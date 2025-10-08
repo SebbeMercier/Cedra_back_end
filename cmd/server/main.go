@@ -9,9 +9,9 @@ import (
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
 	"github.com/markbates/goth"
+	"github.com/markbates/goth/providers/apple"
 	"github.com/markbates/goth/providers/facebook"
 	"github.com/markbates/goth/providers/google"
-	"github.com/markbates/goth/providers/apple"
 
 	"cedra_back_end/internal/config"
 	"cedra_back_end/internal/database"
@@ -19,35 +19,41 @@ import (
 )
 
 func main() {
+	// 1️⃣ Charger la configuration (fichier .env)
 	config.Load()
-	database.ConnectMongo()
 
+	// 2️⃣ Connexion à Mongo, Redis et Elasticsearch
+	database.ConnectDatabases()
 
-	// ✅ Enregistre les providers OAuth
-	
+	// 3️⃣ Configuration des providers OAuth
 	goth.UseProviders(
 		google.New(
 			os.Getenv("GOOGLE_CLIENT_ID"),
 			os.Getenv("GOOGLE_CLIENT_SECRET"),
 			"http://localhost:8080/auth/google/callback",
-			"email", "profile"),
+			"email", "profile",
+		),
 		facebook.New(
 			os.Getenv("FACEBOOK_CLIENT_ID"),
 			os.Getenv("FACEBOOK_CLIENT_SECRET"),
 			"http://localhost:8080/auth/facebook/callback",
-			"email"),
-		 apple.New(
+			"email",
+		),
+		apple.New(
 			os.Getenv("APPLE_CLIENT_ID"),
 			os.Getenv("APPLE_TEAM_ID"),
 			os.Getenv("APPLE_KEY_ID"),
-			http.DefaultClient,                           
-			os.Getenv("APPLE_PRIVATE_KEY"),             
+			http.DefaultClient,
+			os.Getenv("APPLE_PRIVATE_KEY"),
 			"http://localhost:8080/auth/apple/callback",
-			"email", "name"),
-			)
+			"email", "name",
+		),
+	)
 
+	// 4️⃣ Initialisation du moteur Gin
 	r := gin.Default()
 
+	// 5️⃣ Configuration des sessions
 	secret := os.Getenv("SESSION_SECRET")
 	if secret == "" {
 		log.Fatal("❌ SESSION_SECRET manquant dans .env")
@@ -55,14 +61,17 @@ func main() {
 	store := cookie.NewStore([]byte(secret))
 	r.Use(sessions.Sessions("auth-session", store))
 
-	// Routes
+	// 6️⃣ Enregistrement des routes (ton package interne)
 	routes.RegisterRoutes(r)
 
+	// 7️⃣ Lancement du serveur HTTP
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	log.Printf("🚀 Serveur démarré sur :%s\n", port)
-	http.ListenAndServe(":"+port, r)
+	log.Printf("🚀 Serveur Cedra démarré sur le port %s\n", port)
+	if err := http.ListenAndServe(":"+port, r); err != nil {
+		log.Fatalf("❌ Erreur serveur : %v", err)
+	}
 }

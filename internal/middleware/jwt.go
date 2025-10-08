@@ -56,3 +56,6 @@ func AuthRequired() gin.HandlerFunc {
 		c.Next()
 	}
 }
+func AuthJWT(c *gin.Context) {
+	AuthRequired()(c)
+}
