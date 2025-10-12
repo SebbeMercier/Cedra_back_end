@@ -114,6 +114,7 @@ func GetAllProducts(c *gin.Context) {
 }
 
 // 🔍 Recherche de produits via Elasticsearch
+// 🔍 Recherche de produits via Elasticsearch ou Mongo si indisponible
 func SearchProducts(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
@@ -121,14 +122,43 @@ func SearchProducts(c *gin.Context) {
 		return
 	}
 
+	// 1️⃣ Tentative de recherche dans Elasticsearch
 	results, err := services.SearchProducts(query)
+	if err == nil && len(results) > 0 {
+		c.JSON(http.StatusOK, results)
+		return
+	}
+
+	// 2️⃣ Si Elasticsearch est vide ou indisponible → fallback MongoDB
+	ctx := context.Background()
+	filter := bson.M{
+		"$or": []bson.M{
+			{"name": bson.M{"$regex": query, "$options": "i"}},
+			{"description": bson.M{"$regex": query, "$options": "i"}},
+			{"tags": bson.M{"$regex": query, "$options": "i"}},
+		},
+	}
+
+	cursor, err := getProductCollection().Find(ctx, filter)
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur recherche MongoDB"})
+		return
+	}
+
+	var products []models.Product
+	if err := cursor.All(ctx, &products); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, results)
+	if len(products) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "Aucun produit trouvé"})
+		return
+	}
+
+	c.JSON(http.StatusOK, products)
 }
+
 
 func GetProductsByCategory(c *gin.Context) {
 	categoryID := c.Param("id")
@@ -149,67 +179,4 @@ func GetProductsByCategory(c *gin.Context) {
 	var products []models.Product
 	cursor.All(ctx, &products)
 	c.JSON(http.StatusOK, products)
-}
-
-
-// 🛒 Ajouter un produit au panier (Redis)
-func AddToCart(c *gin.Context) {
-	userID := c.GetString("user_id") // défini par middleware JWT
-	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Utilisateur non authentifié"})
-		return
-	}
-
-	var item models.CartItem
-	if err := c.BindJSON(&item); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	ctx := context.Background()
-	cartKey := "cart:" + userID
-
-	val, _ := database.RedisClient.Get(ctx, cartKey).Result()
-	var cart models.Cart
-	if val != "" {
-		_ = json.Unmarshal([]byte(val), &cart)
-	} else {
-		cart.UserID = userID
-	}
-
-	found := false
-	for i, ci := range cart.Items {
-		if ci.ProductID == item.ProductID {
-			cart.Items[i].Quantity += item.Quantity
-			found = true
-			break
-		}
-	}
-	if !found {
-		cart.Items = append(cart.Items, item)
-	}
-
-	data, _ := json.Marshal(cart)
-	database.RedisClient.Set(ctx, cartKey, data, 24*time.Hour)
-
-	c.JSON(http.StatusOK, gin.H{"message": "Produit ajouté au panier"})
-}
-
-// 🧺 Voir le panier
-func GetCart(c *gin.Context) {
-	userID := c.GetString("user_id")
-	if userID == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Utilisateur non authentifié"})
-		return
-	}
-
-	val, err := database.RedisClient.Get(context.Background(), "cart:"+userID).Result()
-	if err != nil || val == "" {
-		c.JSON(http.StatusOK, gin.H{"items": []models.CartItem{}})
-		return
-	}
-
-	var cart models.Cart
-	_ = json.Unmarshal([]byte(val), &cart)
-	c.JSON(http.StatusOK, cart)
 }

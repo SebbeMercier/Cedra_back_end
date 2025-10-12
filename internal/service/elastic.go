@@ -4,60 +4,111 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
+	"github.com/elastic/go-elasticsearch/v8/esapi"
 )
 
+//
+// --- INDEXATION DANS ELASTICSEARCH ---
+//
+
+// Indexe un produit MongoDB dans Elasticsearch
 func IndexProduct(p models.Product) {
-	body, _ := json.Marshal(p)
-	res, err := database.ElasticClient.Index(
-		"products",
-		bytes.NewReader(body),
-		database.ElasticClient.Index.WithDocumentID(p.ID.Hex()),
-	)
+	if database.ElasticClient == nil {
+		log.Println("⚠️ Elastic non initialisé, impossible d’indexer:", p.Name)
+		return
+	}
+
+	data, _ := json.Marshal(p)
+	req := esapi.IndexRequest{
+		Index:      "products",                  // nom de ton index
+		DocumentID: p.ID.Hex(),                  // identifiant unique du produit
+		Body:       bytes.NewReader(data),
+		Refresh:    "true",                      // rend la donnée immédiatement visible
+	}
+
+	res, err := req.Do(context.Background(), database.ElasticClient)
 	if err != nil {
-		fmt.Println("❌ Erreur indexation Elasticsearch:", err)
+		log.Println("❌ Erreur envoi Elastic:", err)
 		return
 	}
 	defer res.Body.Close()
+
+	if res.IsError() {
+		log.Printf("⚠️ Elastic a renvoyé une erreur pour %s: %s", p.Name, res.String())
+	} else {
+		log.Printf("✅ Produit indexé dans Elasticsearch: %s", p.Name)
+	}
 }
 
-func SearchProducts(query string) ([]models.Product, error) {
+//
+// --- RECHERCHE DANS ELASTICSEARCH ---
+//
+
+// Recherche des produits dans Elasticsearch par nom, description ou tags
+func SearchProducts(query string) ([]map[string]interface{}, error) {
+	if database.ElasticClient == nil {
+		return nil, errors.New("client Elasticsearch non initialisé")
+	}
+
 	var buf bytes.Buffer
-	searchQuery := map[string]interface{}{
+	q := map[string]interface{}{
 		"query": map[string]interface{}{
 			"multi_match": map[string]interface{}{
 				"query":  query,
-				"fields": []string{"name", "description"},
+				"fields": []string{"name", "description", "tags"},
 			},
 		},
 	}
-	json.NewEncoder(&buf).Encode(searchQuery)
 
-	res, err := database.ElasticClient.Search(
-		database.ElasticClient.Search.WithContext(context.Background()),
-		database.ElasticClient.Search.WithIndex("products"),
-		database.ElasticClient.Search.WithBody(&buf),
-	)
+	if err := json.NewEncoder(&buf).Encode(q); err != nil {
+		return nil, fmt.Errorf("erreur encodage requête: %v", err)
+	}
+
+	req := esapi.SearchRequest{
+		Index: []string{"products"},
+		Body:  &buf,
+	}
+	res, err := req.Do(context.Background(), database.ElasticClient)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erreur requête Elastic: %v", err)
 	}
 	defer res.Body.Close()
 
-	var r map[string]interface{}
-	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
-		return nil, err
+	if res.IsError() {
+		var e map[string]interface{}
+		json.NewDecoder(res.Body).Decode(&e)
+		log.Printf("❌ Elasticsearch erreur: %+v", e)
+		return nil, errors.New("index non trouvé ou vide")
 	}
 
-	var results []models.Product
-	for _, hit := range r["hits"].(map[string]interface{})["hits"].([]interface{}) {
-		source := hit.(map[string]interface{})["_source"]
-		b, _ := json.Marshal(source)
-		var p models.Product
-		json.Unmarshal(b, &p)
-		results = append(results, p)
+	var r map[string]interface{}
+	if err := json.NewDecoder(res.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("erreur décodage JSON: %v", err)
 	}
+
+	hitsData, ok := r["hits"].(map[string]interface{})
+	if !ok {
+		return nil, errors.New("réponse Elastic invalide (pas de hits)")
+	}
+
+	hitsArray, ok := hitsData["hits"].([]interface{})
+	if !ok {
+		return nil, errors.New("aucun résultat trouvé")
+	}
+
+	results := make([]map[string]interface{}, 0, len(hitsArray))
+	for _, hit := range hitsArray {
+		hitMap, _ := hit.(map[string]interface{})
+		if source, ok := hitMap["_source"].(map[string]interface{}); ok {
+			results = append(results, source)
+		}
+	}
+
 	return results, nil
 }

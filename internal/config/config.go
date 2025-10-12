@@ -7,8 +7,11 @@ import (
 )
 
 func Load() {
-	err := godotenv.Load(".env") // 👈 précise explicitement le fichier
+	// Charge .env
+	err := godotenv.Load(".env")
 	if err != nil {
-		log.Fatalf("❌ Impossible de charger .env: %v", err)
+		log.Println("⚠️  Aucun fichier .env trouvé — on continue avec les variables d'environnement du système")
+	} else {
+		log.Println("✅ Fichier .env chargé avec succès")
 	}
 }

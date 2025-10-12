@@ -17,6 +17,7 @@ func RegisterRoutes(r *gin.Engine) {
 		auth.GET("/:provider", handlers.BeginAuth)
 		auth.GET("/:provider/callback", handlers.CallbackAuth)
 
+		// 🔐 Routes protégées
 		protected := auth.Group("/")
 		protected.Use(middleware.AuthRequired())
 		protected.GET("/me", handlers.Me)
@@ -54,6 +55,9 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// --- CATEGORIES ---
 	RegisterCategoryRoutes(r)
+
+	// --- CART ---
+	RegisterCartRoutes(r)
 }
 
 // ✅ Module PRODUITS
@@ -62,14 +66,7 @@ func RegisterProductRoutes(r *gin.Engine) {
 	{
 		api.GET("/", handlers.GetAllProducts)
 		api.GET("/search", handlers.SearchProducts)
-		api.POST("/", middleware.RequireAdmin, handlers.CreateProduct)
-	}
-
-	cart := r.Group("/api/cart")
-	cart.Use(middleware.AuthJWT)
-	{
-		cart.POST("/add", handlers.AddToCart)
-		cart.GET("/", handlers.GetCart)
+		api.POST("/", middleware.AuthRequired(), middleware.RequireAdmin, handlers.CreateProduct)
 	}
 }
 
@@ -79,5 +76,16 @@ func RegisterCategoryRoutes(r *gin.Engine) {
 	{
 		api.GET("/", handlers.GetAllCategories)
 		api.POST("/", middleware.AuthRequired(), handlers.CreateCategory)
+	}
+}
+
+// ✅ Module PANIER (Redis)
+func RegisterCartRoutes(r *gin.Engine) {
+	cart := r.Group("/api/cart")
+	cart.Use(middleware.AuthRequired())
+	{
+		cart.GET("/", handlers.GetCart)
+		cart.POST("/add", handlers.AddToCart)
+		cart.DELETE("/:productId", handlers.RemoveFromCart)
 	}
 }

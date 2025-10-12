@@ -69,14 +69,14 @@ func connectMongo(ctx context.Context) {
 	if err != nil {
 		log.Fatal("❌ Erreur connexion Mongo ADDRESSES:", err)
 	}
-	MongoAddressesDB = clientAddresses.Database("db_addresses")
+	MongoAddressesDB = clientAddresses.Database("addresses_db") // ✅ corrigé
 
 	// --- COMPANY ---
 	clientCompany, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_COMPANY_URL")))
 	if err != nil {
 		log.Fatal("❌ Erreur connexion Mongo COMPANY:", err)
 	}
-	MongoCompanyDB = clientCompany.Database("db_company")
+	MongoCompanyDB = clientCompany.Database("company_db") // ✅ corrigé
 
 	// --- PRODUITS ---
 	clientProducts, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("MONGO_PRODUCTS_URL")))
@@ -94,6 +94,7 @@ func connectMongo(ctx context.Context) {
 
 	log.Println("✅ Connecté à toutes les bases MongoDB (Auth, Orders, Company, Products, Categories)")
 }
+
 
 //
 // --- REDIS ---
