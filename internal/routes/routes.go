@@ -7,23 +7,21 @@ import (
 )
 
 func RegisterRoutes(r *gin.Engine) {
-	// --- AUTH ---
+	// --- Authentification ---
 	auth := r.Group("/api/auth")
 	{
 		auth.POST("/register", handlers.CreateUser)
 		auth.POST("/login", handlers.Login)
 
-		// OAuth
 		auth.GET("/:provider", handlers.BeginAuth)
 		auth.GET("/:provider/callback", handlers.CallbackAuth)
 
-		// 🔐 Routes protégées
 		protected := auth.Group("/")
 		protected.Use(middleware.AuthRequired())
 		protected.GET("/me", handlers.Me)
 	}
 
-	// --- ADDRESSES ---
+	// --- Adresses ---
 	addresses := r.Group("/api/addresses")
 	addresses.Use(middleware.AuthRequired())
 	{
@@ -33,7 +31,7 @@ func RegisterRoutes(r *gin.Engine) {
 		addresses.POST("/:id/default", handlers.MakeDefaultAddress)
 	}
 
-	// --- COMPANY ---
+	// --- Entreprise ---
 	company := r.Group("/api/company")
 	company.Use(middleware.AuthRequired())
 	{
@@ -50,27 +48,31 @@ func RegisterRoutes(r *gin.Engine) {
 		}
 	}
 
-	// --- PRODUCTS ---
+	// --- Produits ---
 	RegisterProductRoutes(r)
 
-	// --- CATEGORIES ---
+	// --- Catégories ---
 	RegisterCategoryRoutes(r)
 
-	// --- CART ---
+	// --- Panier ---
 	RegisterCartRoutes(r)
+
+	// --- Images ---
+	RegisterImageRoutes(r)
 }
 
-// ✅ Module PRODUITS
+// PRODUITS
 func RegisterProductRoutes(r *gin.Engine) {
 	api := r.Group("/api/products")
 	{
 		api.GET("/", handlers.GetAllProducts)
 		api.GET("/search", handlers.SearchProducts)
+		api.GET("/category/:id", handlers.GetProductsByCategory) // facultatif
 		api.POST("/", middleware.AuthRequired(), middleware.RequireAdmin, handlers.CreateProduct)
 	}
 }
 
-// ✅ Module CATÉGORIES
+// CATEGORIES
 func RegisterCategoryRoutes(r *gin.Engine) {
 	api := r.Group("/api/categories")
 	{
@@ -79,7 +81,7 @@ func RegisterCategoryRoutes(r *gin.Engine) {
 	}
 }
 
-// ✅ Module PANIER (Redis)
+// PANIER
 func RegisterCartRoutes(r *gin.Engine) {
 	cart := r.Group("/api/cart")
 	cart.Use(middleware.AuthRequired())
@@ -87,5 +89,22 @@ func RegisterCartRoutes(r *gin.Engine) {
 		cart.GET("/", handlers.GetCart)
 		cart.POST("/add", handlers.AddToCart)
 		cart.DELETE("/:productId", handlers.RemoveFromCart)
+		cart.DELETE("/clear", handlers.ClearCart) // 🧹 Nouveau endpoint pour vider le panier
+	}
+}
+
+// IMAGES
+func RegisterImageRoutes(r *gin.Engine) {
+	images := r.Group("/api/images")
+
+	// 🔓 Lecture publique
+	images.GET("/:productId", handlers.GetProductImages)
+
+	// 🔐 Actions protégées (upload + suppression)
+	protected := images.Group("/")
+	protected.Use(middleware.AuthRequired())
+	{
+		protected.POST("/upload", handlers.UploadProductImage)
+		protected.DELETE("/:id", handlers.DeleteProductImage)
 	}
 }

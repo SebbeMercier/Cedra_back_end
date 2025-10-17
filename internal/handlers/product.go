@@ -59,10 +59,6 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
-	// ✅ Ajoute le produit
-	p.CreatedAt = time.Now()
-	p.UpdatedAt = p.CreatedAt
-
 	res, err := getProductCollection().InsertOne(ctx, p)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -77,13 +73,10 @@ func CreateProduct(c *gin.Context) {
 	c.JSON(http.StatusOK, p)
 }
 
-
-// 🔵 Lister les produits
 func GetAllProducts(c *gin.Context) {
 	ctx := context.Background()
 	cacheKey := "products:all"
 
-	// ✅ Vérifie le cache Redis
 	if val, err := database.RedisClient.Get(ctx, cacheKey).Result(); err == nil && val != "" {
 		var cached []models.Product
 		if err := json.Unmarshal([]byte(val), &cached); err == nil {
@@ -92,7 +85,6 @@ func GetAllProducts(c *gin.Context) {
 		}
 	}
 
-	// 🧠 Sinon, lit depuis Mongo
 	cursor, err := getProductCollection().Find(ctx, bson.M{})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -105,7 +97,6 @@ func GetAllProducts(c *gin.Context) {
 		return
 	}
 
-	// 🔁 Met en cache Redis pour 1h
 	if data, err := json.Marshal(products); err == nil {
 		database.RedisClient.Set(ctx, cacheKey, data, time.Hour)
 	}
@@ -113,7 +104,6 @@ func GetAllProducts(c *gin.Context) {
 	c.JSON(http.StatusOK, products)
 }
 
-// 🔍 Recherche de produits via Elasticsearch
 // 🔍 Recherche de produits via Elasticsearch ou Mongo si indisponible
 func SearchProducts(c *gin.Context) {
 	query := c.Query("q")
@@ -158,7 +148,6 @@ func SearchProducts(c *gin.Context) {
 
 	c.JSON(http.StatusOK, products)
 }
-
 
 func GetProductsByCategory(c *gin.Context) {
 	categoryID := c.Param("id")
