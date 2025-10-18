@@ -12,20 +12,19 @@ import (
 	"github.com/markbates/goth/providers/apple"
 	"github.com/markbates/goth/providers/facebook"
 	"github.com/markbates/goth/providers/google"
-
+	"github.com/gin-contrib/cors"
 	"cedra_back_end/internal/config"
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/routes"
+	"time"
 )
 
 func main() {
 	// 1️⃣ Charger la configuration (fichier .env)
 	config.Load()
 
-	// 2️⃣ Connexion à Mongo, Redis et Elasticsearch
 	database.ConnectDatabases()
 
-	// 3️⃣ Configuration des providers OAuth
 	goth.UseProviders(
 		google.New(
 			os.Getenv("GOOGLE_CLIENT_ID"),
@@ -50,10 +49,8 @@ func main() {
 		),
 	)
 
-	// 4️⃣ Initialisation du moteur Gin
 	r := gin.Default()
 
-	// 5️⃣ Configuration des sessions
 	secret := os.Getenv("SESSION_SECRET")
 	if secret == "" {
 		log.Fatal("❌ SESSION_SECRET manquant dans .env")
@@ -61,10 +58,18 @@ func main() {
 	store := cookie.NewStore([]byte(secret))
 	r.Use(sessions.Sessions("auth-session", store))
 
-	// 6️⃣ Enregistrement des routes (ton package interne)
+
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"}, // ou "http://192.168.1.200"
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
 	routes.RegisterRoutes(r)
 
-	// 7️⃣ Lancement du serveur HTTP
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

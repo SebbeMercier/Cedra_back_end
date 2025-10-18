@@ -48,16 +48,12 @@ func RegisterRoutes(r *gin.Engine) {
 		}
 	}
 
-	// --- Produits ---
 	RegisterProductRoutes(r)
 
-	// --- Catégories ---
 	RegisterCategoryRoutes(r)
 
-	// --- Panier ---
 	RegisterCartRoutes(r)
 
-	// --- Images ---
 	RegisterImageRoutes(r)
 }
 
@@ -69,6 +65,7 @@ func RegisterProductRoutes(r *gin.Engine) {
 		api.GET("/search", handlers.SearchProducts)
 		api.GET("/category/:id", handlers.GetProductsByCategory) // facultatif
 		api.POST("/", middleware.AuthRequired(), middleware.RequireAdmin, handlers.CreateProduct)
+		api.GET("/:id/full", handlers.GetProductFull)
 	}
 }
 

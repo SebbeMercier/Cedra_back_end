@@ -3,9 +3,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"time"
-
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -13,12 +14,10 @@ import (
 
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
-	"cedra_back_end/internal/service"
+	"cedra_back_end/internal/services"
 )
 
-//
-// --- MONGO COLLECTION ---
-//
+
 func getProductCollection() *mongo.Collection {
 	if database.MongoProductsDB == nil {
 		panic("❌ MongoProductsDB non initialisée — as-tu bien appelé database.ConnectDatabases() ?")
@@ -26,14 +25,10 @@ func getProductCollection() *mongo.Collection {
 	return database.MongoProductsDB.Collection("products")
 }
 
-//
-// --- HANDLERS ---
-//
-
-// 🟢 Créer un produit (admin)
-// 🟢 Créer un produit (avec vérification de la catégorie)
 func CreateProduct(c *gin.Context) {
+	ctx := context.Background()
 	var p models.Product
+
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -44,21 +39,26 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
-	// ✅ Vérifie que la catégorie existe dans db_categories
-	ctx := context.Background()
+	// ✅ Vérifie la catégorie
 	catColl := database.MongoCategoriesDB.Collection("categories")
-
 	var category bson.M
-	err := catColl.FindOne(ctx, bson.M{"_id": p.CategoryID}).Decode(&category)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Catégorie introuvable"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur vérification catégorie"})
+	if err := catColl.FindOne(ctx, bson.M{"_id": p.CategoryID}).Decode(&category); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Catégorie introuvable"})
 		return
 	}
 
+	// ✅ Génère automatiquement l’URL MinIO si tu sais où l’image est stockée
+	// Exemple : ton upload MinIO met le fichier dans "products/xxx.jpg"
+	if len(p.ImageURLs) == 0 || p.ImageURLs[0] == "" {
+		imageURL := fmt.Sprintf("http://%s/%s/products/%s.jpg",
+			os.Getenv("MINIO_ENDPOINT"),
+			os.Getenv("MINIO_BUCKET"),
+			p.Name, // tu peux adapter selon ta logique
+		)
+		p.ImageURLs = []string{imageURL}
+	}
+
+	// ✅ Sauvegarde dans Mongo
 	res, err := getProductCollection().InsertOne(ctx, p)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -67,11 +67,12 @@ func CreateProduct(c *gin.Context) {
 
 	p.ID = res.InsertedID.(primitive.ObjectID)
 
-	// 🔄 Indexe dans Elasticsearch
+	// 🔄 Indexation Elasticsearch
 	go services.IndexProduct(p)
 
 	c.JSON(http.StatusOK, p)
 }
+
 
 func GetAllProducts(c *gin.Context) {
 	ctx := context.Background()
@@ -104,7 +105,6 @@ func GetAllProducts(c *gin.Context) {
 	c.JSON(http.StatusOK, products)
 }
 
-// 🔍 Recherche de produits via Elasticsearch ou Mongo si indisponible
 func SearchProducts(c *gin.Context) {
 	query := c.Query("q")
 	if query == "" {
@@ -112,14 +112,29 @@ func SearchProducts(c *gin.Context) {
 		return
 	}
 
-	// 1️⃣ Tentative de recherche dans Elasticsearch
+	// 🔎 1️⃣ Recherche dans Elasticsearch
 	results, err := services.SearchProducts(query)
 	if err == nil && len(results) > 0 {
+		// ✅ Génère les URLs signées MinIO pour chaque produit
+		for i := range results {
+			if urls, ok := results[i]["image_urls"].([]interface{}); ok {
+				signed := []string{}
+				for _, u := range urls {
+					if str, ok := u.(string); ok && str != "" {
+						signedURL, err := services.GenerateSignedURL(context.Background(), str, 24*time.Hour)
+						if err == nil {
+							signed = append(signed, signedURL)
+						}
+					}
+				}
+				results[i]["image_urls"] = signed
+			}
+		}
 		c.JSON(http.StatusOK, results)
 		return
 	}
 
-	// 2️⃣ Si Elasticsearch est vide ou indisponible → fallback MongoDB
+	// 🔁 2️⃣ Fallback MongoDB si ES vide
 	ctx := context.Background()
 	filter := bson.M{
 		"$or": []bson.M{
@@ -141,13 +156,21 @@ func SearchProducts(c *gin.Context) {
 		return
 	}
 
-	if len(products) == 0 {
-		c.JSON(http.StatusOK, gin.H{"message": "Aucun produit trouvé"})
-		return
+	// ✅ Génère les URLs signées MinIO
+	for i, p := range products {
+		signed := []string{}
+		for _, url := range p.ImageURLs {
+			signedURL, err := services.GenerateSignedURL(ctx, url, 24*time.Hour)
+			if err == nil {
+				signed = append(signed, signedURL)
+			}
+		}
+		products[i].ImageURLs = signed
 	}
 
 	c.JSON(http.StatusOK, products)
 }
+
 
 func GetProductsByCategory(c *gin.Context) {
 	categoryID := c.Param("id")
