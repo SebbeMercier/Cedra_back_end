@@ -13,9 +13,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-//
-// 🛒 GET /api/cart
-//
 func GetCart(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
@@ -58,6 +55,11 @@ func AddToCart(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Données invalides"})
+		return
+	}
+
+	if input.Quantity <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Quantité invalide"})
 		return
 	}
 
@@ -115,7 +117,10 @@ func AddToCart(c *gin.Context) {
 	jsonData, _ := json.Marshal(cart)
 	database.RedisClient.Set(context.Background(), key, jsonData, 30*24*time.Hour)
 
-	c.JSON(http.StatusOK, cart)
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Produit ajouté au panier",
+		"items":   cart,
+	})
 }
 
 //
@@ -150,31 +155,31 @@ func RemoveFromCart(c *gin.Context) {
 	jsonData, _ := json.Marshal(newCart)
 	database.RedisClient.Set(context.Background(), key, jsonData, 30*24*time.Hour)
 
-	c.JSON(http.StatusOK, newCart)
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Produit supprimé du panier",
+		"items":   newCart,
+	})
 }
 
+//
+// 🧹 DELETE /api/cart/clear
+//
 func ClearCart(c *gin.Context) {
-    userID := c.GetString("user_id")
-    if userID == "" {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "non authentifié"})
-        return
-    }
+	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "non authentifié"})
+		return
+	}
 
-    key := "cart:" + userID
+	key := "cart:" + userID
 
-    // 🔹 Vérifie si le panier existe
-    exists, _ := database.RedisClient.Exists(context.Background(), key).Result()
-    if exists == 0 {
-        c.JSON(http.StatusOK, gin.H{"message": "Panier déjà vide"})
-        return
-    }
+	// 🧹 Supprime complètement la clé Redis
+	if err := database.RedisClient.Del(context.Background(), key).Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors du vidage du panier"})
+		return
+	}
 
-    // 🧹 Supprime complètement la clé Redis
-    err := database.RedisClient.Del(context.Background(), key).Err()
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur suppression panier"})
-        return
-    }
-
-    c.JSON(http.StatusOK, gin.H{"message": "Panier vidé avec succès"})
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Panier vidé avec succès",
+	})
 }

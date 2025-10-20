@@ -49,14 +49,13 @@ func RegisterRoutes(r *gin.Engine) {
 	}
 
 	RegisterProductRoutes(r)
-
 	RegisterCategoryRoutes(r)
-
 	RegisterCartRoutes(r)
-
 	RegisterImageRoutes(r)
-}
 
+	// 🆕 ✅ N’oublie pas cette ligne :
+	RegisterPaymentRoutes(r)
+}
 // PRODUITS
 func RegisterProductRoutes(r *gin.Engine) {
 	api := r.Group("/api/products")
@@ -104,4 +103,15 @@ func RegisterImageRoutes(r *gin.Engine) {
 		protected.POST("/upload", handlers.UploadProductImage)
 		protected.DELETE("/:id", handlers.DeleteProductImage)
 	}
+}
+
+func RegisterPaymentRoutes(r *gin.Engine) {
+	payment := r.Group("/api/payments")
+	payment.Use(middleware.AuthRequired())
+	{
+		payment.POST("/create-intent", handlers.CreatePaymentIntent)
+	}
+
+	// Webhook Stripe (public)
+	r.POST("/api/payments/webhook", handlers.StripeWebhook)
 }
