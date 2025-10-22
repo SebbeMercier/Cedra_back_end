@@ -1,4 +1,4 @@
-package handlers
+package product
 
 import (
 	"context"
@@ -16,7 +16,6 @@ import (
 	"cedra_back_end/internal/models"
 	"cedra_back_end/internal/services"
 )
-
 
 func getProductCollection() *mongo.Collection {
 	if database.MongoProductsDB == nil {
@@ -171,7 +170,6 @@ func SearchProducts(c *gin.Context) {
 	c.JSON(http.StatusOK, products)
 }
 
-
 func GetProductsByCategory(c *gin.Context) {
 	categoryID := c.Param("id")
 
@@ -191,4 +189,53 @@ func GetProductsByCategory(c *gin.Context) {
 	var products []models.Product
 	cursor.All(ctx, &products)
 	c.JSON(http.StatusOK, products)
+}
+
+func GetBestSellers(c *gin.Context) {
+    coll := database.MongoOrdersDB.Collection("orders") // ⚠️ Utilise MongoOrdersDB, pas MongoProductsDB
+    ctx := context.Background()
+
+    // On agrège les ventes sur les 30 derniers jours
+    thirtyDaysAgo := time.Now().AddDate(0, 0, -30)
+    pipeline := mongo.Pipeline{
+        {{Key: "$match", Value: bson.D{{Key: "created_at", Value: bson.D{{Key: "$gte", Value: thirtyDaysAgo}}}}}},
+        {{Key: "$unwind", Value: "$items"}},
+        {{Key: "$group", Value: bson.D{
+            {Key: "_id", Value: "$items.product_id"},
+            {Key: "totalSold", Value: bson.D{{Key: "$sum", Value: "$items.quantity"}}},
+        }}},
+        {{Key: "$sort", Value: bson.D{{Key: "totalSold", Value: -1}}}},
+        {{Key: "$limit", Value: 10}},
+        {{Key: "$lookup", Value: bson.D{
+            {Key: "from", Value: "products"},
+            {Key: "localField", Value: "_id"},
+            {Key: "foreignField", Value: "_id"},
+            {Key: "as", Value: "product"},
+        }}},
+        {{Key: "$unwind", Value: "$product"}},
+    }
+
+    cur, err := coll.Aggregate(ctx, pipeline)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    var results []bson.M
+    if err := cur.All(ctx, &results); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    var products []models.Product
+    for _, r := range results {
+        if p, ok := r["product"].(bson.M); ok {
+            productJSON, _ := json.Marshal(p)
+            var prod models.Product
+            json.Unmarshal(productJSON, &prod)
+            products = append(products, prod)
+        }
+    }
+
+    c.JSON(http.StatusOK, products)
 }

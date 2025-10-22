@@ -1,4 +1,4 @@
-package handlers
+package user
 
 import (
 	"cedra_back_end/internal/database"

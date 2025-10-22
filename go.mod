@@ -7,10 +7,12 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/joho/godotenv v1.5.1
+	github.com/jung-kurt/gofpdf v1.16.2
 	github.com/markbates/goth v1.82.0
 	github.com/minio/minio-go/v7 v7.0.95
 	github.com/redis/go-redis/v9 v9.14.0
-	github.com/stripe/stripe-go/v80 v80.2.1
+	github.com/stripe/stripe-go/v83 v83.0.1
+	github.com/wneessen/go-mail v0.7.2
 	go.mongodb.org/mongo-driver v1.17.4
 	golang.org/x/crypto v0.42.0
 )

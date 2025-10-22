@@ -4,14 +4,31 @@ import (
 	"cedra_back_end/internal/config"
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/routes"
-	"github.com/gin-gonic/gin"
 	"log"
 	"os"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stripe/stripe-go/v83"
 )
 
 func main() {
 	// 🔹 1. Charger le .env
 	config.Load()
+
+	secret := os.Getenv("STRIPE_SECRET_KEY")
+	if secret == "" {
+		log.Println("❌ STRIPE_SECRET_KEY absente")
+	} else {
+		log.Println("✅ STRIPE_SECRET_KEY présente")
+	}
+
+	// ✅ Initialiser Stripe ici (après .env)
+	stripe.Key = secret
+	if stripe.Key == "" {
+		log.Fatal("❌ Impossible d’initialiser Stripe : clé manquante")
+	} else {
+		log.Println("✅ Stripe initialisé avec la clé secrète")
+	}
 
 	// 🔹 2. Connexion aux bases
 	database.ConnectDatabases()
