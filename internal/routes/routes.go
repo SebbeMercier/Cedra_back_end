@@ -1,32 +1,30 @@
 package routes
 
 import (
+	"cedra_back_end/internal/handlers/Company"
+	"cedra_back_end/internal/handlers/payement"
 	"cedra_back_end/internal/handlers/product"
 	"cedra_back_end/internal/handlers/user"
-	"cedra_back_end/internal/handlers/company"
-	"cedra_back_end/internal/handlers/payement"
 	"cedra_back_end/internal/middleware"
+
 	"github.com/gin-gonic/gin"
 )
 
-func RegisterRoutes(r *gin.Engine) {
-	// --- Authentification ---
-	auth := r.Group("/api/auth")
+func RegisterRoutes(router *gin.Engine) {
+	api := router.Group("/api")
+
+	// ========== AUTH ==========
+	auth := api.Group("/auth")
 	{
 		auth.POST("/register", user.CreateUser)
 		auth.POST("/login", user.Login)
-
 		auth.GET("/:provider", user.BeginAuth)
 		auth.GET("/:provider/callback", user.CallbackAuth)
-
-		protected := auth.Group("/")
-		protected.Use(middleware.AuthRequired())
-		protected.GET("/me", user.Me)
+		auth.GET("/me", middleware.AuthRequired(), user.Me)
 	}
 
-	// --- Adresses ---
-	addresses := r.Group("/api/addresses")
-	addresses.Use(middleware.AuthRequired())
+	// ========== ADDRESSES ==========
+	addresses := api.Group("/addresses", middleware.AuthRequired())
 	{
 		addresses.GET("/mine", user.ListMyAddresses)
 		addresses.POST("", user.CreateAddress)
@@ -34,87 +32,62 @@ func RegisterRoutes(r *gin.Engine) {
 		addresses.POST("/:id/default", user.MakeDefaultAddress)
 	}
 
-	// --- Entreprise ---
-	company := r.Group("/api/company")
-	company.Use(middleware.AuthRequired())
+	// ========== ORDERS ========== ✅ NOUVEAU
+	orders := api.Group("/orders", middleware.AuthRequired())
 	{
-		company.GET("/me", Company.GetMyCompany)
-
-		admin := company.Group("/")
-		admin.Use(middleware.CompanyAdminRequired())
-		{
-			admin.PUT("/billing", Company.UpdateCompanyBilling)
-			admin.GET("/employees", Company.ListCompanyEmployees)
-			admin.POST("/employees", Company.AddCompanyEmployee)
-			admin.DELETE("/employees/:userId", Company.RemoveCompanyEmployee)
-			admin.PUT("/employees/:userId/admin", Company.ToggleEmployeeAdmin)
-		}
+		orders.GET("/mine", user.GetMyOrders)        // Liste de toutes les commandes
+		orders.GET("/:id", user.GetOrderByID)        // Détail d'une commande
 	}
 
-	RegisterProductRoutes(r)
-	RegisterCategoryRoutes(r)
-	RegisterCartRoutes(r)
-	RegisterImageRoutes(r)
-
-	// 🆕 ✅ N’oublie pas cette ligne :
-	RegisterPaymentRoutes(r)
-}
-// PRODUITS
-func RegisterProductRoutes(r *gin.Engine) {
-	api := r.Group("/api/products")
+	// ========== COMPANY ==========
+	companyGroup := api.Group("/company", middleware.AuthRequired())
 	{
-		api.GET("/", product.GetAllProducts)
-		api.GET("/search", product.SearchProducts)
-		api.GET("/category/:id", product.GetProductsByCategory) // facultatif
-		api.POST("/", middleware.AuthRequired(), middleware.RequireAdmin, product.CreateProduct)
-		api.GET("/:id/full", product.GetProductFull)
+		companyGroup.GET("/me", Company.GetMyCompany)
+		companyGroup.PUT("/billing", middleware.CompanyAdminRequired(), Company.UpdateCompanyBilling)
+		companyGroup.GET("/employees", middleware.CompanyAdminRequired(), Company.ListCompanyEmployees)
+		companyGroup.POST("/employees", middleware.CompanyAdminRequired(), Company.AddCompanyEmployee)
+		companyGroup.DELETE("/employees/:userId", middleware.CompanyAdminRequired(), Company.RemoveCompanyEmployee)
+		companyGroup.PUT("/employees/:userId/admin", middleware.CompanyAdminRequired(), Company.ToggleEmployeeAdmin)
 	}
-}
 
-// CATEGORIES
-func RegisterCategoryRoutes(r *gin.Engine) {
-	api := r.Group("/api/categories")
+	// ========== PRODUCTS ==========
+	products := api.Group("/products")
 	{
-		api.GET("/", product.GetAllCategories)
-		api.POST("/", middleware.AuthRequired(), product.CreateCategory)
+		products.GET("/", product.GetAllProducts)
+		products.GET("/search", product.SearchProducts)
+		products.GET("/category/:id", product.GetProductsByCategory)
+		products.POST("/", middleware.AuthRequired(), middleware.CompanyAdminRequired(), product.CreateProduct)
+		products.GET("/:id/full", product.GetProductFull)
 	}
-}
 
-// PANIER
-func RegisterCartRoutes(r *gin.Engine) {
-	cart := r.Group("/api/cart")
-	cart.Use(middleware.AuthRequired())
+	// ========== CATEGORIES ==========
+	categories := api.Group("/categories")
+	{
+		categories.GET("/", product.GetAllCategories)
+		categories.POST("/", middleware.AuthRequired(), product.CreateCategory)
+	}
+
+	// ========== CART ==========
+	cart := api.Group("/cart", middleware.AuthRequired())
 	{
 		cart.GET("/", user.GetCart)
 		cart.POST("/add", user.AddToCart)
 		cart.DELETE("/:productId", user.RemoveFromCart)
-		cart.DELETE("/clear", user.ClearCart) // 🧹 Nouveau endpoint pour vider le panier
+		cart.DELETE("/clear", user.ClearCart)
 	}
-}
 
-// IMAGES
-func RegisterImageRoutes(r *gin.Engine) {
-	images := r.Group("/api/images")
-
-	// 🔓 Lecture publique
-	images.GET("/:productId", product.GetProductImages)
-
-	// 🔐 Actions protégées (upload + suppression)
-	protected := images.Group("/")
-	protected.Use(middleware.AuthRequired())
+	// ========== IMAGES ==========
+	images := api.Group("/images")
 	{
-		protected.POST("/upload", product.UploadProductImage)
-		protected.DELETE("/:id", product.DeleteProductImage)
+		images.GET("/:productId", product.GetProductImages)
+		images.POST("/upload", middleware.AuthRequired(), product.UploadProductImage)
+		images.DELETE("/:id", middleware.AuthRequired(), product.DeleteProductImage)
 	}
-}
 
-func RegisterPaymentRoutes(r *gin.Engine) {
-	payment := r.Group("/api/payments")
-	payment.Use(middleware.AuthRequired())
+	// ========== PAYMENTS ==========
+	payments := api.Group("/payments")
 	{
-		payment.POST("/create-intent", payement.CreatePaymentIntent)
+		payments.POST("/create-intent", middleware.AuthRequired(), payement.CreatePaymentIntent)
+		payments.POST("/webhook", payement.StripeWebhook)
 	}
-
-	// Webhook Stripe (public)
-	r.POST("/api/payments/webhook", payement.StripeWebhook)
 }
