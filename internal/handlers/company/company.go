@@ -1,4 +1,4 @@
-package Company
+package company
 
 import (
 	"context"

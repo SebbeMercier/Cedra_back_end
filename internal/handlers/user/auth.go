@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"os"
 	"time"
-
+	"log"
+	"strings" // ✅ AJOUT
+	
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
 
@@ -14,14 +16,11 @@ import (
 	"github.com/markbates/goth/gothic"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo" // ✅ AJOUT
 	"golang.org/x/crypto/bcrypt"
 )
 
 var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
-
-type ctxKey string
-
-const providerKey ctxKey = "provider"
 
 // ================== AUTH LOCALE ==================
 
@@ -123,7 +122,10 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
+	token := generateJWT(newUser)
+
 	c.JSON(http.StatusCreated, gin.H{
+		"token":          token,
 		"id":             newUser.ID.Hex(),
 		"email":          newUser.Email,
 		"role":           newUser.Role,
@@ -204,10 +206,19 @@ func BeginAuth(c *gin.Context) {
 		return
 	}
 
-	c.Request = c.Request.WithContext(
-		context.WithValue(c.Request.Context(), providerKey, provider),
-	)
+	// ✅ Récupère et sauvegarde le redirect_uri
+	redirectURI := c.Query("redirect_uri")
+	if redirectURI != "" {
+		session, _ := gothic.Store.Get(c.Request, "goth_session")
+		session.Values["redirect_uri"] = redirectURI
+		session.Save(c.Request, c.Writer)
+	}
 
+	q := c.Request.URL.Query()
+	q.Set("provider", provider)
+	c.Request.URL.RawQuery = q.Encode()
+
+	log.Printf("🔐 BeginAuth pour provider: %s", provider)
 	gothic.BeginAuthHandler(c.Writer, c.Request)
 }
 
@@ -218,50 +229,193 @@ func CallbackAuth(c *gin.Context) {
 		return
 	}
 
-	c.Request = c.Request.WithContext(
-		context.WithValue(c.Request.Context(), providerKey, provider),
-	)
+	q := c.Request.URL.Query()
+	q.Set("provider", provider)
+	c.Request.URL.RawQuery = q.Encode()
+
+	log.Printf("🔐 CallbackAuth pour provider: %s", provider)
 
 	userInfo, err := gothic.CompleteUserAuth(c.Writer, c.Request)
 	if err != nil {
+		log.Printf("❌ Erreur CompleteUserAuth: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	log.Printf("✅ Auth réussie pour %s via %s", userInfo.Email, provider)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := database.MongoAuthDB.Collection("users")
+	var user models.User
+	var isNewUser bool
+
+	// ✅ ÉTAPE 1 : Chercher par provider + provider_id (utilisateur OAuth existant)
+	err = collection.FindOne(ctx, bson.M{
+		"provider":    provider,
+		"provider_id": userInfo.UserID,
+	}).Decode(&user)
+
+	switch err {
+	case nil:
+		// ✅ Utilisateur OAuth trouvé
+		log.Printf("✅ Utilisateur OAuth existant trouvé: %s", user.Email)
+	case mongo.ErrNoDocuments:
+		// ✅ ÉTAPE 2 : Chercher par email (compte local ou autre provider)
+		err = collection.FindOne(ctx, bson.M{
+			"email": userInfo.Email,
+		}).Decode(&user)
+
+		if err == nil {
+			// ✅ FUSION : Un compte avec cet email existe déjà
+			log.Printf("🔗 Fusion de compte : %s (%s) → %s", user.Email, user.Provider, provider)
+
+			update := bson.M{
+				"$set": bson.M{
+					"provider":    provider,
+					"provider_id": userInfo.UserID,
+					"name":        userInfo.Name,
+				},
+			}
+
+			_, err := collection.UpdateOne(ctx, bson.M{"_id": user.ID}, update)
+			if err != nil {
+				log.Printf("❌ Erreur mise à jour compte: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur fusion compte"})
+				return
+			}
+
+			// Recharger l'utilisateur
+			err = collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&user)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur rechargement utilisateur"})
+				return
+			}
+
+			log.Printf("✅ Compte fusionné avec succès")
+		} else {
+			// ✅ ÉTAPE 3 : Créer un nouveau compte
+			isNewUser = true
+			user = models.User{
+				ID:         primitive.NewObjectID(),
+				Email:      userInfo.Email,
+				Name:       userInfo.Name,
+				Provider:   provider,
+				ProviderID: userInfo.UserID,
+				Role:       "customer",
+			}
+
+			_, err := collection.InsertOne(ctx, user)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur enregistrement utilisateur"})
+				return
+			}
+			log.Printf("✅ Nouvel utilisateur créé: %s", user.Email)
+		}
+	default:
+		// Autre erreur MongoDB
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur base de données"})
+		return
+	}
+
+	token := generateJWT(user)
+
+	// ✅ Récupère le redirect_uri depuis la session
+	session, _ := gothic.Store.Get(c.Request, "goth_session")
+	redirectURI, ok := session.Values["redirect_uri"].(string)
+	
+	if !ok || redirectURI == "" {
+		// Fallback sur l'env
+		redirectURI = os.Getenv("FRONTEND_URL")
+		if redirectURI == "" {
+			redirectURI = "http://localhost:5173"
+		}
+	}
+
+	// ✅ Valide que le redirect_uri est autorisé
+	allowedOrigins := []string{
+		"http://localhost:5173",
+		"http://localhost:3000",
+		"https://cedra.com",
+		"cedra://auth/callback",
+		"myapp://auth/callback",
+	}
+
+	isAllowed := false
+	for _, origin := range allowedOrigins {
+		if strings.HasPrefix(redirectURI, origin) {
+			isAllowed = true
+			break
+		}
+	}
+
+	if !isAllowed {
+		log.Printf("⚠️ Redirect URI non autorisé: %s", redirectURI)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Redirect URI non autorisé"})
+		return
+	}
+
+	// ✅ Construit l'URL de redirection
+	separator := "?"
+	if strings.Contains(redirectURI, "?") {
+		separator = "&"
+	}
+
+	finalURL := redirectURI + separator + "token=" + token
+	if isNewUser {
+		finalURL += "&new_user=true"
+	}
+
+	log.Printf("✅ Redirection vers: %s", finalURL)
+	c.Redirect(http.StatusTemporaryRedirect, finalURL)
+}
+
+func MergeAccount(c *gin.Context) {
+	var input struct {
+		Email      string `json:"email"`
+		Provider   string `json:"provider"`
+		ProviderID string `json:"provider_id"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Non authentifié"})
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var user models.User
-	err = database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"provider":    provider,
-		"provider_id": userInfo.UserID,
-	}).Decode(&user)
+	collection := database.MongoAuthDB.Collection("users")
 
-	if err != nil {
-		// Création d'un nouvel utilisateur social
-		user = models.User{
-			ID:         primitive.NewObjectID(),
-			Email:      userInfo.Email,
-			Name:       userInfo.Name,
-			Provider:   provider,
-			ProviderID: userInfo.UserID,
-			Role:       "customer",
-		}
-		_, err := database.MongoAuthDB.Collection("users").InsertOne(ctx, user)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur enregistrement utilisateur"})
-			return
-		}
+	objID, _ := primitive.ObjectIDFromHex(userID)
+	var user models.User
+	err := collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&user)
+	if err != nil || user.Email != input.Email {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Email non autorisé"})
+		return
 	}
 
-	token := generateJWT(user)
-	c.JSON(http.StatusOK, gin.H{
-		"token":    token,
-		"provider": provider,
-		"email":    user.Email,
-		"name":     user.Name,
-		"role":     user.Role,
-	})
+	update := bson.M{
+		"$set": bson.M{
+			"provider":    input.Provider,
+			"provider_id": input.ProviderID,
+		},
+	}
+
+	_, err = collection.UpdateOne(ctx, bson.M{"_id": objID}, update)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur fusion"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Comptes fusionnés avec succès"})
 }
 
 // ================== UTILITAIRES ==================

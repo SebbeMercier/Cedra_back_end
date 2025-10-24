@@ -1,7 +1,7 @@
 package routes
 
 import (
-	"cedra_back_end/internal/handlers/Company"
+	"cedra_back_end/internal/handlers/company"
 	"cedra_back_end/internal/handlers/payement"
 	"cedra_back_end/internal/handlers/product"
 	"cedra_back_end/internal/handlers/user"
@@ -16,11 +16,15 @@ func RegisterRoutes(router *gin.Engine) {
 	// ========== AUTH ==========
 	auth := api.Group("/auth")
 	{
+		// 🔹 Local
 		auth.POST("/register", user.CreateUser)
 		auth.POST("/login", user.Login)
+		auth.GET("/me", middleware.AuthRequired(), user.Me)
+
+		// 🔹 Social (OAuth)
 		auth.GET("/:provider", user.BeginAuth)
 		auth.GET("/:provider/callback", user.CallbackAuth)
-		auth.GET("/me", middleware.AuthRequired(), user.Me)
+		auth.POST("/merge", middleware.AuthRequired(), user.MergeAccount)
 	}
 
 	// ========== ADDRESSES ==========
@@ -32,22 +36,22 @@ func RegisterRoutes(router *gin.Engine) {
 		addresses.POST("/:id/default", user.MakeDefaultAddress)
 	}
 
-	// ========== ORDERS ========== ✅ NOUVEAU
+	// ========== ORDERS ==========
 	orders := api.Group("/orders", middleware.AuthRequired())
 	{
-		orders.GET("/mine", user.GetMyOrders)        // Liste de toutes les commandes
-		orders.GET("/:id", user.GetOrderByID)        // Détail d'une commande
+		orders.GET("/mine", user.GetMyOrders)
+		orders.GET("/:id", user.GetOrderByID)
 	}
 
 	// ========== COMPANY ==========
 	companyGroup := api.Group("/company", middleware.AuthRequired())
 	{
-		companyGroup.GET("/me", Company.GetMyCompany)
-		companyGroup.PUT("/billing", middleware.CompanyAdminRequired(), Company.UpdateCompanyBilling)
-		companyGroup.GET("/employees", middleware.CompanyAdminRequired(), Company.ListCompanyEmployees)
-		companyGroup.POST("/employees", middleware.CompanyAdminRequired(), Company.AddCompanyEmployee)
-		companyGroup.DELETE("/employees/:userId", middleware.CompanyAdminRequired(), Company.RemoveCompanyEmployee)
-		companyGroup.PUT("/employees/:userId/admin", middleware.CompanyAdminRequired(), Company.ToggleEmployeeAdmin)
+		companyGroup.GET("/me", company.GetMyCompany)
+		companyGroup.PUT("/billing", middleware.CompanyAdminRequired(), company.UpdateCompanyBilling)
+		companyGroup.GET("/employees", middleware.CompanyAdminRequired(), company.ListCompanyEmployees)
+		companyGroup.POST("/employees", middleware.CompanyAdminRequired(), company.AddCompanyEmployee)
+		companyGroup.DELETE("/employees/:userId", middleware.CompanyAdminRequired(), company.RemoveCompanyEmployee)
+		companyGroup.PUT("/employees/:userId/admin", middleware.CompanyAdminRequired(), company.ToggleEmployeeAdmin)
 	}
 
 	// ========== PRODUCTS ==========
@@ -56,8 +60,8 @@ func RegisterRoutes(router *gin.Engine) {
 		products.GET("/", product.GetAllProducts)
 		products.GET("/search", product.SearchProducts)
 		products.GET("/category/:id", product.GetProductsByCategory)
-		products.POST("/", middleware.AuthRequired(), middleware.CompanyAdminRequired(), product.CreateProduct)
 		products.GET("/:id/full", product.GetProductFull)
+		products.POST("/", middleware.AuthRequired(), middleware.CompanyAdminRequired(), product.CreateProduct)
 	}
 
 	// ========== CATEGORIES ==========
