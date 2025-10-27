@@ -11,6 +11,7 @@ import (
 )
 
 func RegisterRoutes(router *gin.Engine) {
+
 	api := router.Group("/api")
 
 	// ========== AUTH ==========

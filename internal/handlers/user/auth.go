@@ -81,14 +81,20 @@ func CreateUser(c *gin.Context) {
 		}
 	}
 
+	// ✅ Définit le rôle selon le type de compte dès l'inscription
+	role := "customer"
+	if input.IsCompanyAdmin {
+		role = "company-customer"
+	}
+
 	id := primitive.NewObjectID().Hex()
-	isAdmin := input.IsCompanyAdmin // pour prendre l’adresse du bool
+	isAdmin := input.IsCompanyAdmin
 	user := models.User{
 		ID:             id,
 		Name:           input.Name,
 		Email:          input.Email,
 		Password:       string(hashedPassword),
-		Role:           "customer",
+		Role:           role, // ✅ Rôle défini dès la création
 		Provider:       "local",
 		IsCompanyAdmin: &isAdmin,
 		CompanyID:      companyID,
@@ -367,7 +373,7 @@ func findOrCreateOAuthUser(provider, providerID, email, name string) models.User
 		// 2️⃣ Sinon, recherche par email
 		err = col.FindOne(ctx, bson.M{"email": email}).Decode(&user)
 		if err == mongo.ErrNoDocuments {
-			// 3️⃣ Création d’un nouvel utilisateur OAuth
+			// 3️⃣ Création d'un nouvel utilisateur OAuth avec rôle "pending"
 			id := primitive.NewObjectID().Hex()
 			isAdmin := false
 			user = models.User{
@@ -376,11 +382,11 @@ func findOrCreateOAuthUser(provider, providerID, email, name string) models.User
 				Name:           name,
 				Provider:       provider,
 				ProviderID:     providerID,
-				Role:           "customer",
+				Role:           "pending", // ✅ Rôle temporaire jusqu'à completion du profil
 				IsCompanyAdmin: &isAdmin,
 			}
 			_, _ = col.InsertOne(ctx, user)
-			log.Printf("🆕 Utilisateur OAuth créé (%s) : %s", provider, email)
+			log.Printf("🆕 Utilisateur OAuth créé (%s) avec rôle pending : %s", provider, email)
 		} else {
 			// 4️⃣ Si utilisateur existant → on met à jour son provider
 			_, _ = col.UpdateOne(ctx, bson.M{"email": email}, bson.M{
@@ -498,7 +504,92 @@ func CompleteProfile(c *gin.Context) {
 	}
 
 	log.Printf("✅ user_id trouvé: %v", userID)
-	// ... reste du code
+
+	var input struct {
+		Name              string `json:"name"`
+		IsCompanyAdmin    bool   `json:"isCompanyAdmin"`
+		CompanyName       string `json:"companyName"`
+		BillingStreet     string `json:"billingStreet"`
+		BillingPostalCode string `json:"billingPostalCode"`
+		BillingCity       string `json:"billingCity"`
+		BillingCountry    string `json:"billingCountry"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	id := fmt.Sprintf("%v", userID)
+
+	// Crée la company si admin
+	var companyID *string
+	if input.IsCompanyAdmin && input.CompanyName != "" {
+		company := bson.M{
+			"name":              input.CompanyName,
+			"billingStreet":     input.BillingStreet,
+			"billingPostalCode": input.BillingPostalCode,
+			"billingCity":       input.BillingCity,
+			"billingCountry":    input.BillingCountry,
+			"createdAt":         primitive.NewDateTimeFromTime(time.Now()),
+		}
+		result, err := database.MongoCompanyDB.Collection("companies").InsertOne(ctx, company)
+		if err == nil {
+			if oid, ok := result.InsertedID.(primitive.ObjectID); ok {
+				h := oid.Hex()
+				companyID = &h
+				log.Printf("✅ Company créée: %s", h)
+			}
+		} else {
+			log.Printf("❌ Erreur création company: %v", err)
+		}
+	}
+
+	// ✅ Définit le rôle selon le type de compte
+	role := "customer" // Par défaut : client particulier
+	if input.IsCompanyAdmin {
+		role = "company-customer" // Client professionnel
+	}
+
+	// Met à jour l'utilisateur
+	update := bson.M{
+		"$set": bson.M{
+			"name":           input.Name,
+			"isCompanyAdmin": input.IsCompanyAdmin,
+			"companyName":    input.CompanyName,
+			"role":           role, // ✅ Mise à jour du rôle
+		},
+	}
+
+	if companyID != nil {
+		update["$set"].(bson.M)["companyId"] = *companyID
+	}
+
+	col := database.MongoAuthDB.Collection("users")
+	_, err := col.UpdateOne(ctx, bson.M{"_id": id}, update)
+	if err != nil {
+		// Essaie avec ObjectID si la string ne marche pas
+		if oid, e := primitive.ObjectIDFromHex(id); e == nil {
+			_, err = col.UpdateOne(ctx, bson.M{"_id": oid}, update)
+		}
+	}
+
+	if err != nil {
+		log.Printf("❌ Erreur mise à jour: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur mise à jour profil"})
+		return
+	}
+
+	log.Printf("✅ Profil complété pour user %s (role: %s, isCompanyAdmin: %v)", id, role, input.IsCompanyAdmin)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Profil complété avec succès",
+		"companyId": companyID,
+		"role":      role,
+	})
 }
 
 func Me(c *gin.Context) {
