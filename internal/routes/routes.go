@@ -16,15 +16,22 @@ func RegisterRoutes(router *gin.Engine) {
 	// ========== AUTH ==========
 	auth := api.Group("/auth")
 	{
-		// 🔹 Local
+		// 🔹 Auth locale
 		auth.POST("/register", user.CreateUser)
 		auth.POST("/login", user.Login)
 		auth.GET("/me", middleware.AuthRequired(), user.Me)
 
-		// 🔹 Social (OAuth)
+		// 🔹 Routes protégées AVANT les routes dynamiques
+		auth.POST("/merge", middleware.AuthRequired(), user.MergeAccount)
+		auth.POST("/complete", middleware.AuthRequired(), user.CompleteProfile)
+
+		// 🔹 Auth mobile (OAuth natif iOS / Android)
+		auth.POST("/google/mobile", user.GoogleMobileLogin)
+		auth.POST("/facebook/mobile", user.FacebookMobileLogin)
+
+		// 🔹 Auth sociale (OAuth Web) - Routes dynamiques EN DERNIER
 		auth.GET("/:provider", user.BeginAuth)
 		auth.GET("/:provider/callback", user.CallbackAuth)
-		auth.POST("/merge", middleware.AuthRequired(), user.MergeAccount)
 	}
 
 	// ========== ADDRESSES ==========

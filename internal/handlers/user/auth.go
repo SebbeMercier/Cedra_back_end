@@ -1,22 +1,29 @@
 package user
 
 import (
-	"context"
-	"net/http"
-	"os"
-	"time"
-	"log"
-	"strings" // ✅ AJOUT
-	
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
+	"github.com/markbates/goth/providers/facebook"
+	"github.com/markbates/goth/providers/google"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo" // ✅ AJOUT
+	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -36,7 +43,6 @@ func CreateUser(c *gin.Context) {
 		BillingCity       string `json:"billingCity"`
 		BillingCountry    string `json:"billingCountry"`
 	}
-
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -45,43 +51,21 @@ func CreateUser(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Vérifier si l'email existe déjà
+	// email déjà pris pour un compte local ?
 	var existing models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"email":    input.Email,
-		"provider": "local",
-	}).Decode(&existing)
-
+	err := database.MongoAuthDB.Collection("users").
+		FindOne(ctx, bson.M{"email": input.Email, "provider": "local"}).
+		Decode(&existing)
 	if err == nil {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": "Un compte avec cet email existe déjà",
-			"email": input.Email,
-		})
+		c.JSON(http.StatusConflict, gin.H{"error": "Un compte avec cet email existe déjà"})
 		return
 	}
 
-	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur hash mot de passe"})
-		return
-	}
+	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 
+	// crée la company si admin
 	var companyID *string
-
-	// Si admin société, créer l'entreprise
 	if input.IsCompanyAdmin {
-		// Validation des champs requis
-		if input.CompanyName == "" || input.BillingStreet == "" ||
-			input.BillingPostalCode == "" || input.BillingCity == "" ||
-			input.BillingCountry == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Tous les champs de facturation sont requis pour un compte société",
-			})
-			return
-		}
-
-		// Créer la société
 		company := bson.M{
 			"name":              input.CompanyName,
 			"billingStreet":     input.BillingStreet,
@@ -90,47 +74,42 @@ func CreateUser(c *gin.Context) {
 			"billingCountry":    input.BillingCountry,
 			"createdAt":         primitive.NewDateTimeFromTime(time.Now()),
 		}
-
-		result, err := database.MongoCompanyDB.Collection("companies").InsertOne(ctx, company)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la création de la société"})
-			return
+		result, _ := database.MongoCompanyDB.Collection("companies").InsertOne(ctx, company)
+		if oid, ok := result.InsertedID.(primitive.ObjectID); ok {
+			h := oid.Hex()
+			companyID = &h
 		}
-
-		companyIDHex := result.InsertedID.(primitive.ObjectID).Hex()
-		companyID = &companyIDHex
 	}
 
-	// Créer l'utilisateur
-	newUser := models.User{
-		ID:             primitive.NewObjectID(),
+	id := primitive.NewObjectID().Hex()
+	isAdmin := input.IsCompanyAdmin // pour prendre l’adresse du bool
+	user := models.User{
+		ID:             id,
 		Name:           input.Name,
 		Email:          input.Email,
 		Password:       string(hashedPassword),
 		Role:           "customer",
-		IsCompanyAdmin: input.IsCompanyAdmin,
 		Provider:       "local",
+		IsCompanyAdmin: &isAdmin,
+		CompanyID:      companyID,
+		CompanyName:    input.CompanyName,
 	}
 
-	if companyID != nil {
-		newUser.CompanyID = companyID
-	}
-
-	_, err = database.MongoAuthDB.Collection("users").InsertOne(ctx, newUser)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if _, err := database.MongoAuthDB.Collection("users").InsertOne(ctx, user); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création utilisateur"})
 		return
 	}
 
-	token := generateJWT(newUser)
-
+	token := generateJWT(user)
 	c.JSON(http.StatusCreated, gin.H{
 		"token":          token,
-		"id":             newUser.ID.Hex(),
-		"email":          newUser.Email,
-		"role":           newUser.Role,
-		"isCompanyAdmin": newUser.IsCompanyAdmin,
-		"companyId":      companyID,
+		"userId":         user.ID,
+		"email":          user.Email,
+		"name":           user.Name,
+		"role":           user.Role,
+		"isCompanyAdmin": user.IsCompanyAdmin,
+		"companyId":      user.CompanyID,
+		"companyName":    user.CompanyName,
 	})
 }
 
@@ -139,65 +118,37 @@ func Login(c *gin.Context) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	var user models.User
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"email":    input.Email,
-		"provider": "local",
-	}).Decode(&user)
-
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Utilisateur introuvable"})
+	var user models.User
+	err := database.MongoAuthDB.Collection("users").
+		FindOne(ctx, bson.M{"email": input.Email, "provider": "local"}).
+		Decode(&user)
+	if err != nil || bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
 		return
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Mot de passe incorrect"})
-		return
-	}
-
-	// Récupérer les infos de la société si applicable
-	var companyName *string
-	if user.CompanyID != nil && *user.CompanyID != "" {
-		var company struct {
-			Name string `bson:"name"`
-		}
-
-		companyOID, err := primitive.ObjectIDFromHex(*user.CompanyID)
-		if err == nil {
-			err := database.MongoCompanyDB.Collection("companies").FindOne(
-				ctx,
-				bson.M{"_id": companyOID},
-			).Decode(&company)
-
-			if err == nil {
-				companyName = &company.Name
-			}
-		}
 	}
 
 	token := generateJWT(user)
 	c.JSON(http.StatusOK, gin.H{
 		"token":          token,
-		"userId":         user.ID.Hex(),
-		"name":           user.Name,
+		"userId":         user.ID,
 		"email":          user.Email,
+		"name":           user.Name,
 		"role":           user.Role,
-		"companyId":      user.CompanyID,
-		"companyName":    companyName,
 		"isCompanyAdmin": user.IsCompanyAdmin,
+		"companyId":      user.CompanyID,
+		"companyName":    user.CompanyName,
 	})
 }
 
-// ================== AUTH SOCIALE ==================
+// ================== AUTH SOCIALE (WEB) ==================
 
 func BeginAuth(c *gin.Context) {
 	provider := c.Param("provider")
@@ -206,169 +157,388 @@ func BeginAuth(c *gin.Context) {
 		return
 	}
 
-	// ✅ Récupère et sauvegarde le redirect_uri
-	redirectURI := c.Query("redirect_uri")
-	if redirectURI != "" {
-		session, _ := gothic.Store.Get(c.Request, "goth_session")
-		session.Values["redirect_uri"] = redirectURI
-		session.Save(c.Request, c.Writer)
+	redirectURL := c.Query("redirect_url")
+	baseURL := os.Getenv("BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
+	callbackURL := baseURL + "/api/auth/" + provider + "/callback"
+
+	switch provider {
+	case "google":
+		goth.UseProviders(google.New(
+			os.Getenv("GOOGLE_CLIENT_ID"),
+			os.Getenv("GOOGLE_CLIENT_SECRET"),
+			callbackURL,
+		))
+	case "facebook":
+		goth.UseProviders(facebook.New(
+			os.Getenv("FACEBOOK_CLIENT_ID"),
+			os.Getenv("FACEBOOK_CLIENT_SECRET"),
+			callbackURL,
+		))
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Provider non supporté"})
+		return
+	}
+
+	ctx := context.Background()
+	state := generateRandomState()
+	if redirectURL != "" {
+		_ = database.RedisClient.Set(ctx, "oauth_redirect:"+state, redirectURL, 10*time.Minute).Err()
 	}
 
 	q := c.Request.URL.Query()
 	q.Set("provider", provider)
+	q.Set("state", state)
 	c.Request.URL.RawQuery = q.Encode()
-
-	log.Printf("🔐 BeginAuth pour provider: %s", provider)
 	gothic.BeginAuthHandler(c.Writer, c.Request)
+}
+
+func generateRandomState() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return base64.URLEncoding.EncodeToString(b)
 }
 
 func CallbackAuth(c *gin.Context) {
 	provider := c.Param("provider")
-	if provider == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "aucun provider spécifié"})
+	state := c.Query("state")
+	code := c.Query("code")
+	if provider == "" || code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Paramètres OAuth invalides"})
 		return
 	}
 
-	q := c.Request.URL.Query()
-	q.Set("provider", provider)
-	c.Request.URL.RawQuery = q.Encode()
+	baseURL := os.Getenv("BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
 
-	log.Printf("🔐 CallbackAuth pour provider: %s", provider)
+	var userEmail, userName, userID string
 
-	userInfo, err := gothic.CompleteUserAuth(c.Writer, c.Request)
+	switch provider {
+	case "google":
+		clientID := os.Getenv("GOOGLE_CLIENT_ID")
+		clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
+		redirect := baseURL + "/api/auth/google/callback"
+
+		data := url.Values{}
+		data.Set("code", code)
+		data.Set("client_id", clientID)
+		data.Set("client_secret", clientSecret)
+		data.Set("redirect_uri", redirect)
+		data.Set("grant_type", "authorization_code")
+
+		resp, _ := http.PostForm("https://oauth2.googleapis.com/token", data)
+		defer resp.Body.Close()
+		var tokenResp struct {
+			AccessToken string `json:"access_token"`
+		}
+		json.NewDecoder(resp.Body).Decode(&tokenResp)
+
+		userResp, _ := http.Get("https://www.googleapis.com/oauth2/v2/userinfo?access_token=" + tokenResp.AccessToken)
+		defer userResp.Body.Close()
+		var gu struct{ ID, Email, Name string }
+		json.NewDecoder(userResp.Body).Decode(&gu)
+		userID, userEmail, userName = gu.ID, gu.Email, gu.Name
+
+	case "facebook":
+		clientID := os.Getenv("FACEBOOK_CLIENT_ID")
+		clientSecret := os.Getenv("FACEBOOK_CLIENT_SECRET")
+		redirect := baseURL + "/api/auth/facebook/callback"
+
+		tokenURL := fmt.Sprintf("https://graph.facebook.com/v12.0/oauth/access_token?client_id=%s&redirect_uri=%s&client_secret=%s&code=%s",
+			clientID, url.QueryEscape(redirect), clientSecret, code)
+		resp, _ := http.Get(tokenURL)
+		defer resp.Body.Close()
+		var tokenResp struct{ AccessToken string }
+		json.NewDecoder(resp.Body).Decode(&tokenResp)
+
+		userResp, _ := http.Get("https://graph.facebook.com/me?fields=id,name,email&access_token=" + tokenResp.AccessToken)
+		defer userResp.Body.Close()
+		var fb struct{ ID, Email, Name string }
+		json.NewDecoder(userResp.Body).Decode(&fb)
+		userID, userEmail, userName = fb.ID, fb.Email, fb.Name
+	}
+
+	handleOAuthUser(c, provider, userID, userEmail, userName, state)
+}
+
+// ================== AUTH SOCIALE (MOBILE) ==================
+
+func GoogleMobileLogin(c *gin.Context) {
+	var body struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.IDToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id_token manquant"})
+		return
+	}
+
+	clientIDs := []string{
+		os.Getenv("GOOGLE_WEB_CLIENT_ID"),
+		os.Getenv("GOOGLE_IOS_CLIENT_ID"),
+		os.Getenv("GOOGLE_ANDROID_CLIENT_ID"),
+	}
+
+	resp, err := http.Get("https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(body.IDToken))
 	if err != nil {
-		log.Printf("❌ Erreur CompleteUserAuth: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur vérification Google"})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token Google invalide"})
 		return
 	}
 
-	log.Printf("✅ Auth réussie pour %s via %s", userInfo.Email, provider)
+	var payload struct {
+		Email    string `json:"email"`
+		Name     string `json:"name"`
+		Audience string `json:"aud"`
+		Subject  string `json:"sub"`
+	}
+	json.NewDecoder(resp.Body).Decode(&payload)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	valid := false
+	for _, id := range clientIDs {
+		if payload.Audience == id && id != "" {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Client ID non autorisé"})
+		return
+	}
+
+	user := findOrCreateOAuthUser("google", payload.Subject, payload.Email, payload.Name)
+	token := generateJWT(user)
+	c.JSON(http.StatusOK, gin.H{"token": token, "email": user.Email, "name": user.Name})
+}
+
+func FacebookMobileLogin(c *gin.Context) {
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.AccessToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "access_token manquant"})
+		return
+	}
+
+	resp, err := http.Get("https://graph.facebook.com/me?fields=id,name,email&access_token=" + body.AccessToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur API Facebook"})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token Facebook invalide"})
+		return
+	}
+
+	var fb struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	json.NewDecoder(resp.Body).Decode(&fb)
+
+	user := findOrCreateOAuthUser("facebook", fb.ID, fb.Email, fb.Name)
+	token := generateJWT(user)
+	c.JSON(http.StatusOK, gin.H{"token": token, "email": user.Email, "name": user.Name})
+}
+
+// ================== UTILITAIRES ==================
+
+func findOrCreateOAuthUser(provider, providerID, email, name string) models.User {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	collection := database.MongoAuthDB.Collection("users")
+	col := database.MongoAuthDB.Collection("users")
 	var user models.User
-	var isNewUser bool
 
-	// ✅ ÉTAPE 1 : Chercher par provider + provider_id (utilisateur OAuth existant)
-	err = collection.FindOne(ctx, bson.M{
-		"provider":    provider,
-		"provider_id": userInfo.UserID,
-	}).Decode(&user)
-
-	switch err {
-	case nil:
-		// ✅ Utilisateur OAuth trouvé
-		log.Printf("✅ Utilisateur OAuth existant trouvé: %s", user.Email)
-	case mongo.ErrNoDocuments:
-		// ✅ ÉTAPE 2 : Chercher par email (compte local ou autre provider)
-		err = collection.FindOne(ctx, bson.M{
-			"email": userInfo.Email,
-		}).Decode(&user)
-
-		if err == nil {
-			// ✅ FUSION : Un compte avec cet email existe déjà
-			log.Printf("🔗 Fusion de compte : %s (%s) → %s", user.Email, user.Provider, provider)
-
-			update := bson.M{
+	// 1️⃣ Recherche par provider_id
+	err := col.FindOne(ctx, bson.M{"provider": provider, "provider_id": providerID}).Decode(&user)
+	if err == mongo.ErrNoDocuments {
+		// 2️⃣ Sinon, recherche par email
+		err = col.FindOne(ctx, bson.M{"email": email}).Decode(&user)
+		if err == mongo.ErrNoDocuments {
+			// 3️⃣ Création d’un nouvel utilisateur OAuth
+			id := primitive.NewObjectID().Hex()
+			isAdmin := false
+			user = models.User{
+				ID:             id,
+				Email:          email,
+				Name:           name,
+				Provider:       provider,
+				ProviderID:     providerID,
+				Role:           "customer",
+				IsCompanyAdmin: &isAdmin,
+			}
+			_, _ = col.InsertOne(ctx, user)
+			log.Printf("🆕 Utilisateur OAuth créé (%s) : %s", provider, email)
+		} else {
+			// 4️⃣ Si utilisateur existant → on met à jour son provider
+			_, _ = col.UpdateOne(ctx, bson.M{"email": email}, bson.M{
 				"$set": bson.M{
 					"provider":    provider,
-					"provider_id": userInfo.UserID,
-					"name":        userInfo.Name,
+					"provider_id": providerID,
+					"name":        name,
 				},
-			}
-
-			_, err := collection.UpdateOne(ctx, bson.M{"_id": user.ID}, update)
-			if err != nil {
-				log.Printf("❌ Erreur mise à jour compte: %v", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur fusion compte"})
-				return
-			}
-
-			// Recharger l'utilisateur
-			err = collection.FindOne(ctx, bson.M{"_id": user.ID}).Decode(&user)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur rechargement utilisateur"})
-				return
-			}
-
-			log.Printf("✅ Compte fusionné avec succès")
-		} else {
-			// ✅ ÉTAPE 3 : Créer un nouveau compte
-			isNewUser = true
-			user = models.User{
-				ID:         primitive.NewObjectID(),
-				Email:      userInfo.Email,
-				Name:       userInfo.Name,
-				Provider:   provider,
-				ProviderID: userInfo.UserID,
-				Role:       "customer",
-			}
-
-			_, err := collection.InsertOne(ctx, user)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur enregistrement utilisateur"})
-				return
-			}
-			log.Printf("✅ Nouvel utilisateur créé: %s", user.Email)
+			})
+			log.Printf("🔄 Compte existant fusionné avec provider %s : %s", provider, email)
 		}
-	default:
-		// Autre erreur MongoDB
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur base de données"})
-		return
+	} else {
+		log.Printf("✅ Utilisateur OAuth existant trouvé : %s", email)
 	}
 
+	return user
+}
+
+func handleOAuthUser(c *gin.Context, provider, providerID, email, name, state string) {
+	ctx := context.Background()
+	user := findOrCreateOAuthUser(provider, providerID, email, name)
 	token := generateJWT(user)
 
-	// ✅ Récupère le redirect_uri depuis la session
-	session, _ := gothic.Store.Get(c.Request, "goth_session")
-	redirectURI, ok := session.Values["redirect_uri"].(string)
-	
-	if !ok || redirectURI == "" {
-		// Fallback sur l'env
+	redirectURI, _ := database.RedisClient.Get(ctx, "oauth_redirect:"+state).Result()
+	_, _ = database.RedisClient.Del(ctx, "oauth_redirect:"+state).Result()
+
+	if redirectURI == "" {
 		redirectURI = os.Getenv("FRONTEND_URL")
 		if redirectURI == "" {
 			redirectURI = "http://localhost:5173"
 		}
 	}
 
-	// ✅ Valide que le redirect_uri est autorisé
-	allowedOrigins := []string{
-		"http://localhost:5173",
-		"http://localhost:3000",
-		"https://cedra.com",
-		"cedra://auth/callback",
-		"myapp://auth/callback",
-	}
-
-	isAllowed := false
-	for _, origin := range allowedOrigins {
-		if strings.HasPrefix(redirectURI, origin) {
-			isAllowed = true
-			break
+	// iOS deep link auto si user-agent iOS
+	if !strings.HasPrefix(redirectURI, "cedra://") {
+		ua := strings.ToLower(c.Request.UserAgent())
+		if strings.Contains(ua, "iphone") || strings.Contains(ua, "ios") || strings.Contains(ua, "mobile") {
+			if v := os.Getenv("IOS_REDIRECT_URL"); v != "" {
+				redirectURI = v
+			} else {
+				redirectURI = "cedra://auth/callback"
+			}
 		}
 	}
 
-	if !isAllowed {
-		log.Printf("⚠️ Redirect URI non autorisé: %s", redirectURI)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Redirect URI non autorisé"})
+	allowed := []string{
+		"http://localhost:5173",
+		"http://localhost:3000",
+		"http://cedra.eldocam.com:5173",
+		"http://cedra.eldocam.com",
+		"http://cedra.eldocam.com:8080",
+		"https://cedra.eldocam.com",
+		"https://cedra.com",
+		"cedra://auth/callback",
+	}
+	valid := false
+	for _, o := range allowed {
+		if strings.HasPrefix(redirectURI, o) {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Redirect url non autorisé"})
 		return
 	}
 
-	// ✅ Construit l'URL de redirection
-	separator := "?"
+	sep := "?"
 	if strings.Contains(redirectURI, "?") {
-		separator = "&"
+		sep = "&"
+	}
+	final := redirectURI + sep + "token=" + url.QueryEscape(token)
+	log.Printf("✅ Redirection finale: %s", final)
+	c.Redirect(http.StatusTemporaryRedirect, final)
+}
+
+func generateJWT(user models.User) string {
+	// *bool -> bool (default false si nil)
+	isAdmin := false
+	if user.IsCompanyAdmin != nil {
+		isAdmin = *user.IsCompanyAdmin
 	}
 
-	finalURL := redirectURI + separator + "token=" + token
-	if isNewUser {
-		finalURL += "&new_user=true"
+	log.Printf("🔧 Génération JWT pour user.ID=%s, email=%s", user.ID, user.Email) // ✅ Ajout log
+
+	claims := jwt.MapClaims{
+		"user_id":        user.ID, // ✅ Vérifiez que user.ID n'est pas vide
+		"email":          user.Email,
+		"role":           user.Role,
+		"isCompanyAdmin": isAdmin,
+		"exp":            time.Now().Add(24 * time.Hour).Unix(),
 	}
 
-	log.Printf("✅ Redirection vers: %s", finalURL)
-	c.Redirect(http.StatusTemporaryRedirect, finalURL)
+	log.Printf("🔧 Claims générés: %+v", claims) // ✅ Ajout log
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, _ := token.SignedString(jwtSecret)
+
+	log.Printf("✅ JWT généré (20 premiers chars): %s...", tokenString[:min(20, len(tokenString))]) // ✅ Ajout log
+
+	return tokenString
+}
+
+// ================== HANDLERS SUPPLÉMENTAIRES ==================
+
+func CompleteProfile(c *gin.Context) {
+	log.Println("🎯 CompleteProfile appelé")
+	log.Printf("🔐 Headers reçus: %+v", c.Request.Header)
+
+	userID, ok := c.Get("user_id")
+	if !ok {
+		log.Println("❌ user_id non trouvé dans context")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Utilisateur non authentifié"})
+		return
+	}
+
+	log.Printf("✅ user_id trouvé: %v", userID)
+	// ... reste du code
+}
+
+func Me(c *gin.Context) {
+	userID, ok := c.Get("user_id")
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Utilisateur non authentifié"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	id := fmt.Sprintf("%v", userID)
+
+	var user models.User
+	col := database.MongoAuthDB.Collection("users")
+
+	err := col.FindOne(ctx, bson.M{"_id": id}).Decode(&user)
+	if err != nil {
+		if oid, e := primitive.ObjectIDFromHex(id); e == nil {
+			err = col.FindOne(ctx, bson.M{"_id": oid}).Decode(&user)
+		}
+	}
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Utilisateur introuvable"})
+		return
+	}
+
+	// ✅ Utilise "userId" au lieu de "user_id" pour cohérence
+	c.JSON(http.StatusOK, gin.H{
+		"userId":         user.ID, // ✅ Change ici
+		"name":           user.Name,
+		"email":          user.Email,
+		"role":           user.Role,
+		"companyId":      user.CompanyID,
+		"companyName":    user.CompanyName,
+		"isCompanyAdmin": user.IsCompanyAdmin,
+		"provider":       user.Provider,
+	})
 }
 
 func MergeAccount(c *gin.Context) {
@@ -377,7 +547,6 @@ func MergeAccount(c *gin.Context) {
 		Provider   string `json:"provider"`
 		ProviderID string `json:"provider_id"`
 	}
-
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -392,59 +561,20 @@ func MergeAccount(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	collection := database.MongoAuthDB.Collection("users")
-
-	objID, _ := primitive.ObjectIDFromHex(userID)
 	var user models.User
-	err := collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&user)
+	err := database.MongoAuthDB.Collection("users").
+		FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
 	if err != nil || user.Email != input.Email {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Email non autorisé"})
 		return
 	}
 
-	update := bson.M{
-		"$set": bson.M{
-			"provider":    input.Provider,
-			"provider_id": input.ProviderID,
-		},
-	}
-
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": objID}, update)
+	update := bson.M{"$set": bson.M{"provider": input.Provider, "provider_id": input.ProviderID}}
+	_, err = database.MongoAuthDB.Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur fusion"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Comptes fusionnés avec succès"})
-}
-
-// ================== UTILITAIRES ==================
-
-func generateJWT(user models.User) string {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"user_id":        user.ID.Hex(),
-		"email":          user.Email,
-		"role":           user.Role,
-		"isCompanyAdmin": user.IsCompanyAdmin,
-		"exp":            time.Now().Add(24 * time.Hour).Unix(),
-	})
-
-	tokenString, _ := token.SignedString(jwtSecret)
-	return tokenString
-}
-
-func Me(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	email, _ := c.Get("email")
-	role, _ := c.Get("role")
-	isCompanyAdmin, _ := c.Get("isCompanyAdmin")
-	name, _ := c.Get("name")
-
-	c.JSON(http.StatusOK, gin.H{
-		"user_id":        userID,
-		"email":          email,
-		"role":           role,
-		"name":           name,
-		"isCompanyAdmin": isCompanyAdmin,
-	})
 }
