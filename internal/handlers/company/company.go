@@ -1,19 +1,18 @@
 package company
 
 import (
-	"context"
-	"log"
-	"net/http"
-	"time"
-
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"golang.org/x/crypto/bcrypt"
-
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
+	"cedra_back_end/internal/utils"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"golang.org/x/crypto/bcrypt"
 )
 
 //
@@ -154,18 +153,18 @@ func AddCompanyEmployee(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
 	var input struct {
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Récupère l'admin qui fait la demande
 	var admin models.User
 	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
 		"_id": userID.(string),
@@ -175,6 +174,17 @@ func AddCompanyEmployee(c *gin.Context) {
 		return
 	}
 
+	// Récupère les infos de la company
+	var company bson.M
+	err = database.MongoCompanyDB.Collection("companies").FindOne(ctx, bson.M{
+		"_id": *admin.CompanyID,
+	}).Decode(&company)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Société introuvable"})
+		return
+	}
+
+	// Vérifie si l'email existe déjà
 	var existing models.User
 	err = database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
 		"email": input.Email,
@@ -184,20 +194,29 @@ func AddCompanyEmployee(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+	// ✅ Génère un mot de passe aléatoire
+	randomPassword := generateRandomPassword(12)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(randomPassword), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur hash mot de passe"})
 		return
 	}
 
+	// ✅ Crée l'employé avec role "company-customer"
 	isAdmin := false
+	companyName := ""
+	if name, ok := company["name"].(string); ok {
+		companyName = name
+	}
+
 	newEmployee := models.User{
 		ID:             primitive.NewObjectID().Hex(),
 		Name:           input.Name,
 		Email:          input.Email,
 		Password:       string(hashedPassword),
-		Role:           "customer",
+		Role:           "company-customer", // ✅ Rôle company-customer automatiquement
 		CompanyID:      admin.CompanyID,
+		CompanyName:    companyName,
 		IsCompanyAdmin: &isAdmin,
 		Provider:       "local",
 	}
@@ -208,10 +227,82 @@ func AddCompanyEmployee(c *gin.Context) {
 		return
 	}
 
+	// ✅ Envoie l'email avec le mot de passe (en arrière-plan)
+	go sendEmployeeWelcomeEmail(input.Email, input.Name, companyName, randomPassword)
+
+	log.Printf("✅ Employé créé: %s (%s) pour company %s", input.Name, input.Email, *admin.CompanyID)
+
 	c.JSON(http.StatusCreated, gin.H{
-		"message": "Employé ajouté avec succès",
+		"message": "Employé ajouté avec succès. Un email avec ses identifiants lui a été envoyé.",
 		"id":      newEmployee.ID,
 	})
+}
+
+// ✅ Fonction pour générer un mot de passe aléatoire sécurisé
+func generateRandomPassword(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	b := make([]byte, length)
+	rand.Read(b)
+	for i := range b {
+		b[i] = charset[int(b[i])%len(charset)]
+	}
+	return string(b)
+}
+
+// ✅ Fonction pour envoyer l'email de bienvenue
+func sendEmployeeWelcomeEmail(email, name, companyName, password string) {
+	subject := "Bienvenue chez Cedra - Vos identifiants"
+
+	htmlBody := fmt.Sprintf(`
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+	<title>Bienvenue chez Cedra</title>
+</head>
+<body style="font-family: Arial, sans-serif; background-color: #f9f9f9; padding: 20px;">
+	<div style="max-width: 600px; margin: auto; background-color: white; padding: 20px; border-radius: 10px;">
+		<h2 style="color: #333;">Bienvenue chez Cedra !</h2>
+		<p>Bonjour <b>%s</b>,</p>
+		<p>Un compte a été créé pour vous sur Cedra par <strong>%s</strong>.</p>
+
+		<h3>Vos identifiants de connexion :</h3>
+		<div style="background-color: #f0f0f0; padding: 15px; border-radius: 5px; margin: 20px 0;">
+			<p style="margin: 5px 0;"><strong>Email :</strong> %s</p>
+			<p style="margin: 5px 0;"><strong>Mot de passe :</strong> <code style="background-color: #e0e0e0; padding: 5px 10px; border-radius: 3px; font-size: 16px;">%s</code></p>
+		</div>
+
+		<p>Vous pouvez vous connecter à l'adresse :</p>
+		<p style="text-align: center; margin: 20px 0;">
+			<a href="https://cedra.eldocam.com/login" style="background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">Se connecter</a>
+		</p>
+
+		<p style="font-size: 14px; color: #888; border-left: 3px solid #ffa500; padding-left: 15px; margin-top: 20px;">
+			<strong>⚠️ Sécurité :</strong> Pour des raisons de sécurité, nous vous recommandons vivement de changer votre mot de passe lors de votre première connexion.
+		</p>
+
+		<p style="margin-top: 30px; font-size: 14px; color: #888;">
+			Si vous avez des questions, n'hésitez pas à nous contacter.
+		</p>
+
+		<p style="margin-top: 20px; color: #555;">
+			Cordialement,<br>
+			<strong>L'équipe Cedra</strong>
+		</p>
+	</div>
+</body>
+</html>
+	`, name, companyName, email, password)
+
+	// Utilise votre fonction existante (sans PDF)
+	err := utils.SendConfirmationEmail(email, subject, htmlBody, nil)
+
+	if err != nil {
+		log.Printf("❌ Erreur envoi email à %s: %v", email, err)
+	} else {
+		log.Printf("✅ Email d'identifiants envoyé à %s", email)
+	}
 }
 
 // 🟢 DELETE /api/company/employees/:userId
