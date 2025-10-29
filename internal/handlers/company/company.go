@@ -4,10 +4,12 @@ import (
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
 	"cedra_back_end/internal/utils"
+	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
@@ -15,11 +17,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-//
-// --- HANDLERS SOCIÉTÉ ---
-//
-
-// 🟢 GET /api/company/me
 func GetMyCompany(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	log.Printf("🔍 DEBUG /company/me → user_id=%v (exists=%v)", userID, exists)
@@ -39,30 +36,44 @@ func GetMyCompany(c *gin.Context) {
 	}).Decode(&user)
 
 	if err != nil {
+		log.Printf("❌ Utilisateur introuvable: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Utilisateur introuvable"})
 		return
 	}
 
 	if user.CompanyID == nil || *user.CompanyID == "" {
+		log.Printf("⚠️ Aucune société associée pour l'utilisateur %s", user.Email)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
+		return
+	}
+
+	log.Printf("🔍 CompanyID de l'utilisateur: %s", *user.CompanyID)
+
+	// ✅ Convertir le CompanyID string en ObjectID
+	companyOID, err := primitive.ObjectIDFromHex(*user.CompanyID)
+	if err != nil {
+		log.Printf("❌ Erreur conversion CompanyID en ObjectID: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de société invalide"})
 		return
 	}
 
 	// 🔹 Récupérer la société
 	var company bson.M
 	err = database.MongoCompanyDB.Collection("companies").FindOne(ctx, bson.M{
-		"_id": *user.CompanyID,
+		"_id": companyOID, // ✅ Utiliser l'ObjectID au lieu du string
 	}).Decode(&company)
 
 	if err != nil {
+		log.Printf("❌ Société non trouvée: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Société introuvable"})
 		return
 	}
 
+	log.Printf("✅ Société trouvée: %v", company["name"])
+
 	c.JSON(http.StatusOK, company)
 }
 
-// 🟢 PUT /api/company/billing
 func UpdateCompanyBilling(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
@@ -89,6 +100,13 @@ func UpdateCompanyBilling(c *gin.Context) {
 		return
 	}
 
+	// ✅ Convertir en ObjectID
+	companyOID, err := primitive.ObjectIDFromHex(*user.CompanyID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de société invalide"})
+		return
+	}
+
 	update := bson.M{
 		"$set": bson.M{
 			"billingStreet":     input.BillingStreet,
@@ -99,7 +117,7 @@ func UpdateCompanyBilling(c *gin.Context) {
 	}
 	_, err = database.MongoCompanyDB.Collection("companies").UpdateOne(
 		ctx,
-		bson.M{"_id": *user.CompanyID},
+		bson.M{"_id": companyOID}, // ✅ ObjectID
 		update,
 	)
 	if err != nil {
@@ -110,7 +128,6 @@ func UpdateCompanyBilling(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Adresse de facturation mise à jour"})
 }
 
-// 🟢 GET /api/company/employees
 func ListCompanyEmployees(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
@@ -148,7 +165,6 @@ func ListCompanyEmployees(c *gin.Context) {
 	c.JSON(http.StatusOK, employees)
 }
 
-// 🟢 POST /api/company/employees
 func AddCompanyEmployee(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
@@ -174,15 +190,29 @@ func AddCompanyEmployee(c *gin.Context) {
 		return
 	}
 
+	log.Printf("🔍 CompanyID de l'admin: %s", *admin.CompanyID)
+
+	// ✅ Convertir le CompanyID string en ObjectID
+	companyOID, err := primitive.ObjectIDFromHex(*admin.CompanyID)
+	if err != nil {
+		log.Printf("❌ Erreur conversion CompanyID en ObjectID: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de société invalide"})
+		return
+	}
+
 	// Récupère les infos de la company
 	var company bson.M
 	err = database.MongoCompanyDB.Collection("companies").FindOne(ctx, bson.M{
-		"_id": *admin.CompanyID,
+		"_id": companyOID, // ✅ Utiliser l'ObjectID au lieu du string
 	}).Decode(&company)
+
 	if err != nil {
+		log.Printf("❌ Société non trouvée: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Société introuvable"})
 		return
 	}
+
+	log.Printf("✅ Société trouvée: %v", company["name"])
 
 	// Vérifie si l'email existe déjà
 	var existing models.User
@@ -238,7 +268,6 @@ func AddCompanyEmployee(c *gin.Context) {
 	})
 }
 
-// ✅ Fonction pour générer un mot de passe aléatoire sécurisé
 func generateRandomPassword(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
 	b := make([]byte, length)
@@ -249,7 +278,6 @@ func generateRandomPassword(length int) string {
 	return string(b)
 }
 
-// ✅ Fonction pour envoyer l'email de bienvenue
 func sendEmployeeWelcomeEmail(email, name, companyName, password string) {
 	subject := "Bienvenue chez Cedra - Vos identifiants"
 

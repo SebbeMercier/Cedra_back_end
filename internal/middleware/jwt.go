@@ -73,9 +73,22 @@ func AuthRequired() gin.HandlerFunc {
 			}
 
 			log.Printf("✅ user_id extrait: %s", userID)
+
+			// ✅ Mettre les claims dans le context Gin
 			c.Set("user_id", userID)
 			c.Set("email", claims["email"])
 			c.Set("role", claims["role"])
+
+			// ✅ AJOUT CRITIQUE : Extraire isCompanyAdmin et le mettre dans le context
+			if isCompanyAdmin, ok := claims["isCompanyAdmin"].(bool); ok {
+				c.Set("isCompanyAdmin", isCompanyAdmin)
+				log.Printf("✅ isCompanyAdmin extrait et mis dans context: %v", isCompanyAdmin)
+			} else {
+				// Par défaut false si absent
+				c.Set("isCompanyAdmin", false)
+				log.Printf("⚠️ isCompanyAdmin non trouvé dans claims, défini à false par défaut")
+			}
+
 			c.Next()
 		} else {
 			log.Println("❌ Claims invalides")

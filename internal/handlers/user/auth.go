@@ -33,15 +33,9 @@ var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 func CreateUser(c *gin.Context) {
 	var input struct {
-		Name              string `json:"name"`
-		Email             string `json:"email"`
-		Password          string `json:"password"`
-		IsCompanyAdmin    bool   `json:"isCompanyAdmin"`
-		CompanyName       string `json:"companyName"`
-		BillingStreet     string `json:"billingStreet"`
-		BillingPostalCode string `json:"billingPostalCode"`
-		BillingCity       string `json:"billingCity"`
-		BillingCountry    string `json:"billingCountry"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -51,7 +45,7 @@ func CreateUser(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// email déjà pris pour un compte local ?
+	// Vérifie si l'email existe déjà
 	var existing models.User
 	err := database.MongoAuthDB.Collection("users").
 		FindOne(ctx, bson.M{"email": input.Email, "provider": "local"}).
@@ -63,42 +57,19 @@ func CreateUser(c *gin.Context) {
 
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 
-	// crée la company si admin
-	var companyID *string
-	if input.IsCompanyAdmin {
-		company := bson.M{
-			"name":              input.CompanyName,
-			"billingStreet":     input.BillingStreet,
-			"billingPostalCode": input.BillingPostalCode,
-			"billingCity":       input.BillingCity,
-			"billingCountry":    input.BillingCountry,
-			"createdAt":         primitive.NewDateTimeFromTime(time.Now()),
-		}
-		result, _ := database.MongoCompanyDB.Collection("companies").InsertOne(ctx, company)
-		if oid, ok := result.InsertedID.(primitive.ObjectID); ok {
-			h := oid.Hex()
-			companyID = &h
-		}
-	}
-
-	// ✅ Définit le rôle selon le type de compte dès l'inscription
-	role := "customer"
-	if input.IsCompanyAdmin {
-		role = "company-customer"
-	}
-
+	// ✅ Crée l'utilisateur avec rôle "pending" (sera défini dans CompleteProfile)
 	id := primitive.NewObjectID().Hex()
-	isAdmin := input.IsCompanyAdmin
+	isAdmin := false
 	user := models.User{
 		ID:             id,
 		Name:           input.Name,
 		Email:          input.Email,
 		Password:       string(hashedPassword),
-		Role:           role, // ✅ Rôle défini dès la création
+		Role:           "pending", // ✅ En attente de completion
 		Provider:       "local",
 		IsCompanyAdmin: &isAdmin,
-		CompanyID:      companyID,
-		CompanyName:    input.CompanyName,
+		CompanyID:      nil,
+		CompanyName:    "",
 	}
 
 	if _, err := database.MongoAuthDB.Collection("users").InsertOne(ctx, user); err != nil {
@@ -107,15 +78,14 @@ func CreateUser(c *gin.Context) {
 	}
 
 	token := generateJWT(user)
+
+	log.Printf("✅ Utilisateur créé: %s avec rôle pending", user.Email)
+
+	// ✅ Réponse minimale : juste le token
 	c.JSON(http.StatusCreated, gin.H{
-		"token":          token,
-		"userId":         user.ID,
-		"email":          user.Email,
-		"name":           user.Name,
-		"role":           user.Role,
-		"isCompanyAdmin": user.IsCompanyAdmin,
-		"companyId":      user.CompanyID,
-		"companyName":    user.CompanyName,
+		"token": token,
+		"email": user.Email,
+		"name":  user.Name,
 	})
 }
 
