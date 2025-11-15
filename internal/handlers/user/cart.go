@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 )
 
 func GetCart(c *gin.Context) {
@@ -63,20 +63,50 @@ func AddToCart(c *gin.Context) {
 		return
 	}
 
-	// 🧩 Récupération du produit depuis MongoDB
-	coll := database.MongoProductsDB.Collection("products")
-	var product models.Product
+	// 🧩 Récupération du produit depuis ScyllaDB
+	session, err := database.GetProductsSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	objID, err := primitive.ObjectIDFromHex(input.ProductID)
+	productID, err := uuid.Parse(input.ProductID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ID produit invalide"})
 		return
 	}
+	productUUID := gocql.UUID(productID)
 
-	if err := coll.FindOne(context.Background(), bson.M{"_id": objID}).Decode(&product); err != nil {
+	var product models.Product
+	var (
+		name, description string
+		price             float64
+		stock             int
+		categoryID        gocql.UUID
+		imageURLs         []string
+		tags              []string
+		companyID         gocql.UUID
+		createdAt, updatedAt *time.Time
+	)
+
+	err = session.Query(`SELECT product_id, name, description, price, stock, category_id, company_id, image_urls, tags, created_at, updated_at 
+	                     FROM products WHERE product_id = ?`, productUUID).Scan(
+		&product.ID, &name, &description, &price, &stock, &categoryID, &companyID, &imageURLs, &tags, &createdAt, &updatedAt)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Produit introuvable"})
 		return
 	}
+
+	product.Name = name
+	product.Description = description
+	product.Price = price
+	product.Stock = stock
+	product.CategoryID = categoryID
+	product.ImageURLs = imageURLs
+	product.Tags = tags
+	product.CompanyID = companyID
+	product.CreatedAt = createdAt
+	product.UpdatedAt = updatedAt
 
 	// 🖼️ Première image pour l’aperçu panier
 	imageURL := ""

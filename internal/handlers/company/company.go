@@ -2,9 +2,7 @@ package company
 
 import (
 	"cedra_back_end/internal/database"
-	"cedra_back_end/internal/models"
 	"cedra_back_end/internal/utils"
-	"context"
 	"crypto/rand"
 	"fmt"
 	"log"
@@ -12,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -26,50 +24,73 @@ func GetMyCompany(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
 	// 🔹 Récupérer l'utilisateur
-	var user models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": userID.(string),
-	}).Decode(&user)
+	userIDStr := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
 
+	var (
+		email, name, role, provider, providerID, companyName string
+		companyID                                            *gocql.UUID
+		isCompanyAdmin                                       bool
+		createdAt, updatedAt                                 time.Time
+	)
+
+	err = session.Query(`SELECT email, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at 
+	                     FROM users WHERE user_id = ?`, userUUID).Scan(
+		&email, &name, &role, &provider, &providerID, &companyID, &companyName, &isCompanyAdmin, &createdAt, &updatedAt)
 	if err != nil {
 		log.Printf("❌ Utilisateur introuvable: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Utilisateur introuvable"})
 		return
 	}
 
-	if user.CompanyID == nil || *user.CompanyID == "" {
-		log.Printf("⚠️ Aucune société associée pour l'utilisateur %s", user.Email)
+	if companyID == nil {
+		log.Printf("⚠️ Aucune société associée pour l'utilisateur %s", email)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
 		return
 	}
 
-	log.Printf("🔍 CompanyID de l'utilisateur: %s", *user.CompanyID)
-
-	// ✅ Convertir le CompanyID string en ObjectID
-	companyOID, err := primitive.ObjectIDFromHex(*user.CompanyID)
-	if err != nil {
-		log.Printf("❌ Erreur conversion CompanyID en ObjectID: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de société invalide"})
-		return
-	}
+	log.Printf("🔍 CompanyID de l'utilisateur: %s", companyID.String())
 
 	// 🔹 Récupérer la société
-	var company bson.M
-	err = database.MongoCompanyDB.Collection("companies").FindOne(ctx, bson.M{
-		"_id": companyOID, // ✅ Utiliser l'ObjectID au lieu du string
-	}).Decode(&company)
+	var (
+		companyNameDB, billingStreet, billingPostalCode, billingCity, billingCountry string
+		companyCreatedAt                                                             time.Time
+	)
 
+	err = session.Query(`SELECT name, billing_street, billing_postal_code, billing_city, billing_country, created_at 
+	                     FROM companies WHERE company_id = ?`, *companyID).Scan(
+		&companyNameDB, &billingStreet, &billingPostalCode, &billingCity, &billingCountry, &companyCreatedAt)
 	if err != nil {
 		log.Printf("❌ Société non trouvée: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Société introuvable"})
 		return
 	}
 
-	log.Printf("✅ Société trouvée: %v", company["name"])
+	log.Printf("✅ Société trouvée: %s", companyNameDB)
+
+	companyIDStr := companyID.String()
+	company := map[string]interface{}{
+		"company_id":        companyIDStr,
+		"name":              companyNameDB,
+		"billingStreet":     billingStreet,
+		"billingPostalCode": billingPostalCode,
+		"billingCity":       billingCity,
+		"billingCountry":    billingCountry,
+		"createdAt":         companyCreatedAt,
+	}
 
 	c.JSON(http.StatusOK, company)
 }
@@ -88,38 +109,32 @@ func UpdateCompanyBilling(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var user models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": userID.(string),
-	}).Decode(&user)
-	if err != nil || user.CompanyID == nil {
+	userIDStr := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
+
+	var companyID *gocql.UUID
+	err = session.Query("SELECT company_id FROM users WHERE user_id = ?", userUUID).Scan(&companyID)
+	if err != nil || companyID == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
 		return
 	}
 
-	// ✅ Convertir en ObjectID
-	companyOID, err := primitive.ObjectIDFromHex(*user.CompanyID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de société invalide"})
-		return
-	}
-
-	update := bson.M{
-		"$set": bson.M{
-			"billingStreet":     input.BillingStreet,
-			"billingPostalCode": input.BillingPostalCode,
-			"billingCity":       input.BillingCity,
-			"billingCountry":    input.BillingCountry,
-		},
-	}
-	_, err = database.MongoCompanyDB.Collection("companies").UpdateOne(
-		ctx,
-		bson.M{"_id": companyOID}, // ✅ ObjectID
-		update,
-	)
+	// Mettre à jour la société
+	err = session.Query(`UPDATE companies SET billing_street = ?, billing_postal_code = ?, billing_city = ?, billing_country = ? 
+	                     WHERE company_id = ?`,
+		input.BillingStreet, input.BillingPostalCode, input.BillingCity, input.BillingCountry, *companyID).Exec()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la mise à jour"})
 		return
@@ -131,35 +146,60 @@ func UpdateCompanyBilling(c *gin.Context) {
 func ListCompanyEmployees(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var user models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": userID.(string),
-	}).Decode(&user)
-	if err != nil || user.CompanyID == nil {
+	userIDStr := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
+
+	var companyID *gocql.UUID
+	err = session.Query("SELECT company_id FROM users WHERE user_id = ?", userUUID).Scan(&companyID)
+	if err != nil || companyID == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
 		return
 	}
 
-	cursor, err := database.MongoAuthDB.Collection("users").Find(ctx, bson.M{
-		"companyId": *user.CompanyID,
-	})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la récupération"})
-		return
+	// Récupérer tous les employés de la société
+	var employees []map[string]interface{}
+	iter := session.Query(`SELECT user_id, email, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at 
+	                       FROM users WHERE company_id = ? ALLOW FILTERING`, *companyID).Iter()
+	var (
+		empID                                                                  gocql.UUID
+		empEmail, empName, empRole, empProvider, empProviderID, empCompanyName string
+		empCompanyID                                                           *gocql.UUID
+		empIsAdmin                                                             bool
+		empCreatedAt, empUpdatedAt                                             time.Time
+	)
+	for iter.Scan(&empID, &empEmail, &empName, &empRole, &empProvider, &empProviderID, &empCompanyID, &empCompanyName, &empIsAdmin, &empCreatedAt, &empUpdatedAt) {
+		var empCompanyIDStr *string
+		if empCompanyID != nil {
+			s := empCompanyID.String()
+			empCompanyIDStr = &s
+		}
+		employees = append(employees, map[string]interface{}{
+			"user_id":        empID.String(),
+			"email":          empEmail,
+			"name":           empName,
+			"role":           empRole,
+			"provider":       empProvider,
+			"companyId":      empCompanyIDStr,
+			"companyName":    empCompanyName,
+			"isCompanyAdmin": empIsAdmin,
+			"created_at":     empCreatedAt,
+			"updated_at":     empUpdatedAt,
+		})
 	}
-	defer cursor.Close(ctx)
-
-	var employees []bson.M
-	if err := cursor.All(ctx, &employees); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	for i := range employees {
-		delete(employees[i], "password")
+	if err := iter.Close(); err != nil {
+		log.Printf("⚠️ Erreur fermeture iter: %v", err)
 	}
 
 	c.JSON(http.StatusOK, employees)
@@ -177,48 +217,57 @@ func AddCompanyEmployee(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
+
+	userIDStr := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	adminUUID := gocql.UUID(uid)
 
 	// Récupère l'admin qui fait la demande
-	var admin models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": userID.(string),
-	}).Decode(&admin)
-	if err != nil || admin.CompanyID == nil {
+	var (
+		adminEmail, adminName, adminRole, adminProvider, adminProviderID, adminCompanyName string
+		adminCompanyID                                                                     *gocql.UUID
+		adminIsAdmin                                                                       bool
+		adminCreatedAt, adminUpdatedAt                                                     time.Time
+	)
+
+	err = session.Query(`SELECT email, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at 
+	                     FROM users WHERE user_id = ?`, adminUUID).Scan(
+		&adminEmail, &adminName, &adminRole, &adminProvider, &adminProviderID, &adminCompanyID, &adminCompanyName, &adminIsAdmin, &adminCreatedAt, &adminUpdatedAt)
+	if err != nil || adminCompanyID == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
 		return
 	}
 
-	log.Printf("🔍 CompanyID de l'admin: %s", *admin.CompanyID)
-
-	// ✅ Convertir le CompanyID string en ObjectID
-	companyOID, err := primitive.ObjectIDFromHex(*admin.CompanyID)
-	if err != nil {
-		log.Printf("❌ Erreur conversion CompanyID en ObjectID: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "ID de société invalide"})
-		return
-	}
+	log.Printf("🔍 CompanyID de l'admin: %s", adminCompanyID.String())
 
 	// Récupère les infos de la company
-	var company bson.M
-	err = database.MongoCompanyDB.Collection("companies").FindOne(ctx, bson.M{
-		"_id": companyOID, // ✅ Utiliser l'ObjectID au lieu du string
-	}).Decode(&company)
+	var companyNameDB, billingStreet, billingPostalCode, billingCity, billingCountry string
+	var companyCreatedAt time.Time
 
+	err = session.Query(`SELECT name, billing_street, billing_postal_code, billing_city, billing_country, created_at 
+	                     FROM companies WHERE company_id = ?`, *adminCompanyID).Scan(
+		&companyNameDB, &billingStreet, &billingPostalCode, &billingCity, &billingCountry, &companyCreatedAt)
 	if err != nil {
 		log.Printf("❌ Société non trouvée: %v", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Société introuvable"})
 		return
 	}
 
-	log.Printf("✅ Société trouvée: %v", company["name"])
+	log.Printf("✅ Société trouvée: %s", companyNameDB)
 
 	// Vérifie si l'email existe déjà
-	var existing models.User
-	err = database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"email": input.Email,
-	}).Decode(&existing)
+	var existingUserID gocql.UUID
+	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&existingUserID)
 	if err == nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "Un compte avec cet email existe déjà"})
 		return
@@ -234,37 +283,34 @@ func AddCompanyEmployee(c *gin.Context) {
 
 	// ✅ Crée l'employé avec role "company-customer"
 	isAdmin := false
-	companyName := ""
-	if name, ok := company["name"].(string); ok {
-		companyName = name
-	}
+	employeeID := gocql.TimeUUID()
+	employeeIDStr := employeeID.String()
+	now := time.Now()
 
-	newEmployee := models.User{
-		ID:             primitive.NewObjectID().Hex(),
-		Name:           input.Name,
-		Email:          input.Email,
-		Password:       string(hashedPassword),
-		Role:           "company-customer", // ✅ Rôle company-customer automatiquement
-		CompanyID:      admin.CompanyID,
-		CompanyName:    companyName,
-		IsCompanyAdmin: &isAdmin,
-		Provider:       "local",
-	}
-
-	_, err = database.MongoAuthDB.Collection("users").InsertOne(ctx, newEmployee)
+	// Insert dans users
+	err = session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		employeeID, input.Email, string(hashedPassword), input.Name, "company-customer", "local", "", *adminCompanyID, companyNameDB, isAdmin, now, now).Exec()
 	if err != nil {
+		log.Printf("❌ Erreur insertion employé: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// ✅ Envoie l'email avec le mot de passe (en arrière-plan)
-	go sendEmployeeWelcomeEmail(input.Email, input.Name, companyName, randomPassword)
+	// Insert dans users_by_email
+	err = session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", input.Email, employeeID).Exec()
+	if err != nil {
+		log.Printf("⚠️ Erreur insertion index email: %v", err)
+	}
 
-	log.Printf("✅ Employé créé: %s (%s) pour company %s", input.Name, input.Email, *admin.CompanyID)
+	// ✅ Envoie l'email avec le mot de passe (en arrière-plan)
+	go sendEmployeeWelcomeEmail(input.Email, input.Name, companyNameDB, randomPassword)
+
+	log.Printf("✅ Employé créé: %s (%s) pour company %s", input.Name, input.Email, adminCompanyID.String())
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "Employé ajouté avec succès. Un email avec ses identifiants lui a été envoyé.",
-		"id":      newEmployee.ID,
+		"id":      employeeIDStr,
 	})
 }
 
@@ -338,36 +384,67 @@ func RemoveCompanyEmployee(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	employeeID := c.Param("userId")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var admin models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": userID.(string),
-	}).Decode(&admin)
-	if err != nil || admin.CompanyID == nil {
+	userIDStr := fmt.Sprintf("%v", userID)
+	adminUID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	adminUUID := gocql.UUID(adminUID)
+
+	// Récupérer l'admin
+	var adminCompanyID *gocql.UUID
+	err = session.Query("SELECT company_id FROM users WHERE user_id = ?", adminUUID).Scan(&adminCompanyID)
+	if err != nil || adminCompanyID == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
 		return
 	}
 
-	var employee models.User
-	err = database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": employeeID,
-	}).Decode(&employee)
-	if err != nil || employee.CompanyID == nil || *employee.CompanyID != *admin.CompanyID {
+	// Récupérer l'employé
+	employeeUID, err := uuid.Parse(employeeID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID employé invalide"})
+		return
+	}
+	employeeUUID := gocql.UUID(employeeUID)
+
+	var employeeCompanyID *gocql.UUID
+	err = session.Query("SELECT company_id FROM users WHERE user_id = ?", employeeUUID).Scan(&employeeCompanyID)
+	if err != nil || employeeCompanyID == nil || *employeeCompanyID != *adminCompanyID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Employé introuvable ou n'appartient pas à votre société"})
 		return
 	}
 
-	if employeeID == userID.(string) {
+	if employeeID == userIDStr {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Vous ne pouvez pas vous retirer vous-même"})
 		return
 	}
 
-	_, err = database.MongoAuthDB.Collection("users").DeleteOne(ctx, bson.M{"_id": employeeID})
+	// Récupérer l'email avant de supprimer l'utilisateur
+	var employeeEmail string
+	err = session.Query("SELECT email FROM users WHERE user_id = ?", employeeUUID).Scan(&employeeEmail)
 	if err != nil {
+		log.Printf("⚠️ Impossible de récupérer l'email de l'employé: %v", err)
+	}
+
+	// Supprimer l'employé
+	err = session.Query("DELETE FROM users WHERE user_id = ?", employeeUUID).Exec()
+	if err != nil {
+		log.Printf("❌ Erreur suppression employé: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la suppression"})
 		return
+	}
+
+	// Supprimer aussi de l'index email
+	if employeeEmail != "" {
+		session.Query("DELETE FROM users_by_email WHERE email = ?", employeeEmail).Exec()
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Employé retiré avec succès"})
@@ -386,33 +463,48 @@ func ToggleEmployeeAdmin(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var admin models.User
-	err := database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": userID.(string),
-	}).Decode(&admin)
-	if err != nil || admin.CompanyID == nil {
+	userIDStr := fmt.Sprintf("%v", userID)
+	adminUID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	adminUUID := gocql.UUID(adminUID)
+
+	// Récupérer l'admin
+	var adminCompanyID *gocql.UUID
+	err = session.Query("SELECT company_id FROM users WHERE user_id = ?", adminUUID).Scan(&adminCompanyID)
+	if err != nil || adminCompanyID == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Aucune société associée"})
 		return
 	}
 
-	var employee models.User
-	err = database.MongoAuthDB.Collection("users").FindOne(ctx, bson.M{
-		"_id": employeeID,
-	}).Decode(&employee)
-	if err != nil || employee.CompanyID == nil || *employee.CompanyID != *admin.CompanyID {
+	// Récupérer l'employé
+	employeeUID, err := uuid.Parse(employeeID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID employé invalide"})
+		return
+	}
+	employeeUUID := gocql.UUID(employeeUID)
+
+	var employeeCompanyID *gocql.UUID
+	err = session.Query("SELECT company_id FROM users WHERE user_id = ?", employeeUUID).Scan(&employeeCompanyID)
+	if err != nil || employeeCompanyID == nil || *employeeCompanyID != *adminCompanyID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Employé introuvable ou n'appartient pas à votre société"})
 		return
 	}
 
-	isAdmin := input.IsCompanyAdmin
-	_, err = database.MongoAuthDB.Collection("users").UpdateOne(
-		ctx,
-		bson.M{"_id": employeeID},
-		bson.M{"$set": bson.M{"isCompanyAdmin": &isAdmin}},
-	)
+	// Mettre à jour le statut admin
+	now := time.Now()
+	err = session.Query("UPDATE users SET is_company_admin = ?, updated_at = ? WHERE user_id = ?",
+		input.IsCompanyAdmin, now, employeeUUID).Exec()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la mise à jour"})
 		return

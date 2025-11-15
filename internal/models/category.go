@@ -1,13 +1,16 @@
 package models
 
 import (
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/gocql/gocql"
+	"time"
 )
 
 type Category struct {
-	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Name        string             `bson:"name" json:"name"`
-	Slug        string             `bson:"slug" json:"slug"`
-	Description string             `bson:"description,omitempty" json:"description,omitempty"`
-	ImageURL    string             `bson:"image_url,omitempty" json:"image_url,omitempty"`
+	ID          gocql.UUID `json:"id,omitempty"`
+	Name        string     `json:"name"`
+	Slug        string     `json:"slug"`
+	Description string     `json:"description,omitempty"`
+	ImageURL    string     `json:"image_url,omitempty"`
+	ParentCategoryID *gocql.UUID `json:"parent_category_id,omitempty"`
+	CreatedAt   *time.Time `json:"created_at,omitempty"`
 }

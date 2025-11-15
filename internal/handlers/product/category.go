@@ -10,19 +10,17 @@ import (
 	"cedra_back_end/internal/models"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/gocql/gocql"
 )
-
-func getCategoryCollection() *mongo.Collection {
-	if database.MongoCategoriesDB == nil {
-		panic("❌ MongoCategoriesDB n'est pas initialisée")
-	}
-	return database.MongoCategoriesDB.Collection("categories")
-}
 
 // 🟢 Créer une catégorie
 func CreateCategory(c *gin.Context) {
+	session, err := database.GetProductsSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
+
 	var cat models.Category
 	if err := c.ShouldBindJSON(&cat); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -34,13 +32,22 @@ func CreateCategory(c *gin.Context) {
 		return
 	}
 
-	res, err := getCategoryCollection().InsertOne(context.TODO(), cat)
+	// Générer un UUID pour la catégorie
+	categoryID := gocql.TimeUUID()
+	cat.ID = categoryID
+	now := time.Now()
+	cat.CreatedAt = &now
+
+	// Insert dans categories
+	err = session.Query(`INSERT INTO categories (category_id, name, slug, description, parent_category_id, image_url, created_at) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		categoryID, cat.Name, cat.Slug, cat.Description, cat.ParentCategoryID, cat.ImageURL, now).Exec()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"id": res.InsertedID})
+	c.JSON(http.StatusOK, gin.H{"id": categoryID.String()})
 }
 
 // 🔵 Lister les catégories
@@ -57,15 +64,39 @@ func GetAllCategories(c *gin.Context) {
 		return
 	}
 
-	cursor, err := getCategoryCollection().Find(ctx, bson.M{})
+	session, err := database.GetProductsSession()
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
+
+	// Récupérer toutes les catégories
+	var cats []models.Category
+	iter := session.Query("SELECT category_id, name, slug, description, parent_category_id, image_url, created_at FROM categories").Iter()
+	var (
+		categoryID                        gocql.UUID
+		name, slug, description, imageURL string
+		parentCategoryID                  *gocql.UUID
+		createdAt                         time.Time
+	)
+	for iter.Scan(&categoryID, &name, &slug, &description, &parentCategoryID, &imageURL, &createdAt) {
+		cat := models.Category{
+			ID:               categoryID,
+			Name:             name,
+			Slug:             slug,
+			Description:      description,
+			ParentCategoryID: parentCategoryID,
+			ImageURL:         imageURL,
+			CreatedAt:        &createdAt,
+		}
+		cats = append(cats, cat)
+	}
+	if err := iter.Close(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	var cats []models.Category
-	cursor.All(ctx, &cats)
-
+	// Mettre en cache
 	data, _ := json.Marshal(cats)
 	database.RedisClient.Set(ctx, cacheKey, data, time.Hour)
 

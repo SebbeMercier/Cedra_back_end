@@ -12,11 +12,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gocql/gocql"
 	"github.com/stripe/stripe-go/v83"
 	"github.com/stripe/stripe-go/v83/paymentintent"
 	"github.com/stripe/stripe-go/v83/webhook"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/bson"
 )
 
 // ✅ Crée un PaymentIntent Stripe
@@ -137,14 +136,16 @@ func handleStripeEvent(event stripe.Event) {
 	log.Printf("👤 User ID = %s | 📧 Email = %s", userID, userEmail)
 
 	// Vérifier si la commande existe déjà
-	ctx := context.Background()
-	collection := database.MongoOrdersDB.Collection("orders")
-	count, err := collection.CountDocuments(ctx, bson.M{"payment_intent_id": pi.ID})
+	session, err := database.GetOrdersSession()
 	if err != nil {
-		log.Println("❌ Erreur MongoDB count:", err)
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
 		return
 	}
-	if count > 0 {
+
+	// Vérifier si une commande avec ce payment_intent_id existe déjà
+	var existingOrderID gocql.UUID
+	err = session.Query("SELECT order_id FROM orders WHERE payment_intent_id = ? ALLOW FILTERING", pi.ID).Scan(&existingOrderID)
+	if err == nil {
 		log.Println("🔁 Commande déjà enregistrée, on ignore.")
 		return
 	}
@@ -157,35 +158,63 @@ func handleStripeEvent(event stripe.Event) {
 	}
 	log.Printf("🛒 Articles dans le panier : %d", len(cartItems))
 
-	// Créer la commande
-	order := models.Order{
-		ID:              primitive.NewObjectID(),
-		UserID:          userID,
-		PaymentIntentID: pi.ID,
-		TotalPrice:      calcTotal(cartItems),
-		Status:          "paid",
-		CreatedAt:       time.Now(),
-		Items:           []models.OrderItem{},
-	}
-
+	// Créer les items de commande
+	var orderItems []models.OrderItem
 	for _, item := range cartItems {
-     order.Items = append(order.Items, models.OrderItem{
-        ProductID: item.ProductID,
-        Quantity:  item.Quantity,
-        Price:     item.Price,
-        Name:      item.Name, 
-    })
+		orderItems = append(orderItems, models.OrderItem{
+			ProductID: item.ProductID,
+			Quantity:  item.Quantity,
+			Price:     item.Price,
+			Name:      item.Name,
+		})
 	}
 
-	log.Println("📤 Insertion commande MongoDB...")
-	res, err := collection.InsertOne(ctx, order)
+	// Sérialiser les items en JSON pour ScyllaDB
+	itemsJSON, err := json.Marshal(orderItems)
 	if err != nil {
-		log.Println("❌ Erreur insertion Mongo :", err)
+		log.Printf("❌ Erreur sérialisation items: %v", err)
 		return
 	}
-	log.Printf("✅ Commande insérée avec ID = %v", res.InsertedID)
+
+	// Créer la commande
+	orderID := gocql.TimeUUID()
+	now := time.Now()
+	totalPrice := calcTotal(cartItems)
+
+	log.Println("📤 Insertion commande ScyllaDB...")
+
+	// Insert dans orders
+	err = session.Query(`INSERT INTO orders (order_id, user_id, payment_intent_id, items, total_price, status, created_at, updated_at) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		orderID, userID, pi.ID, string(itemsJSON), totalPrice, "paid", now, now).Exec()
+	if err != nil {
+		log.Printf("❌ Erreur insertion ScyllaDB : %v", err)
+		return
+	}
+
+	// Insert dans orders_by_user pour l'index
+	err = session.Query(`INSERT INTO orders_by_user (user_id, order_id, payment_intent_id, items, total_price, status, created_at) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		userID, orderID, pi.ID, string(itemsJSON), totalPrice, "paid", now).Exec()
+	if err != nil {
+		log.Printf("⚠️ Erreur insertion index orders_by_user: %v", err)
+	}
+
+	log.Printf("✅ Commande insérée avec ID = %s", orderID.String())
+
+	// Créer l'objet order pour les fonctions utils
+	order := models.Order{
+		ID:              orderID,
+		UserID:          userID,
+		PaymentIntentID: pi.ID,
+		TotalPrice:      totalPrice,
+		Status:          "paid",
+		CreatedAt:       now,
+		Items:           orderItems,
+	}
 
 	// ✅ Supprimer le panier Redis APRÈS la commande
+	ctx := context.Background()
 	key := "cart:" + userID
 	if err := database.RedisClient.Del(ctx, key).Err(); err == nil {
 		log.Printf("🧹 Panier supprimé Redis pour %s", userID)

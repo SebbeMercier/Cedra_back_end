@@ -10,29 +10,26 @@ import (
 
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
+
 	"github.com/elastic/go-elasticsearch/v8/esapi"
 )
 
-//
-// --- INDEXATION DANS ELASTICSEARCH ---
-//
-
-// Indexe un produit MongoDB dans Elasticsearch
+// Indexe un produit ScyllaDB dans Elasticsearch
 func IndexProduct(p models.Product) {
-	if database.ElasticClient == nil {
-		log.Println("⚠️ Elastic non initialisé, impossible d’indexer:", p.Name)
+	if database.Elastic == nil {
+		log.Println("⚠️ Elastic non initialisé, impossible d'indexer:", p.Name)
 		return
 	}
 
 	data, _ := json.Marshal(p)
 	req := esapi.IndexRequest{
-		Index:      "products",                  // nom de ton index
-		DocumentID: p.ID.Hex(),                  // identifiant unique du produit
+		Index:      "products",
+		DocumentID: p.ID.String(),
 		Body:       bytes.NewReader(data),
-		Refresh:    "true",                      // rend la donnée immédiatement visible
+		Refresh:    "true",
 	}
 
-	res, err := req.Do(context.Background(), database.ElasticClient)
+	res, err := req.Do(context.Background(), database.Elastic)
 	if err != nil {
 		log.Println("❌ Erreur envoi Elastic:", err)
 		return
@@ -46,13 +43,9 @@ func IndexProduct(p models.Product) {
 	}
 }
 
-//
-// --- RECHERCHE DANS ELASTICSEARCH ---
-//
-
 // Recherche des produits dans Elasticsearch par nom, description ou tags
 func SearchProducts(query string) ([]map[string]interface{}, error) {
-	if database.ElasticClient == nil {
+	if database.Elastic == nil {
 		return nil, errors.New("client Elasticsearch non initialisé")
 	}
 
@@ -74,7 +67,7 @@ func SearchProducts(query string) ([]map[string]interface{}, error) {
 		Index: []string{"products"},
 		Body:  &buf,
 	}
-	res, err := req.Do(context.Background(), database.ElasticClient)
+	res, err := req.Do(context.Background(), database.Elastic)
 	if err != nil {
 		return nil, fmt.Errorf("erreur requête Elastic: %v", err)
 	}

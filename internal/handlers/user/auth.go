@@ -16,14 +16,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gocql/gocql"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 	"github.com/markbates/goth/providers/facebook"
 	"github.com/markbates/goth/providers/google"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -42,46 +41,66 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Vérifie si l'email existe déjà
-	var existing models.User
-	err := database.MongoAuthDB.Collection("users").
-		FindOne(ctx, bson.M{"email": input.Email, "provider": "local"}).
-		Decode(&existing)
-	if err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "Un compte avec cet email existe déjà"})
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
 		return
+	}
+
+	// Vérifie si l'email existe déjà via users_by_email
+	var existingUserID gocql.UUID
+	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&existingUserID)
+	if err == nil {
+		// Vérifier aussi le provider
+		var provider string
+		err = session.Query("SELECT provider FROM users WHERE user_id = ?", existingUserID).Scan(&provider)
+		if err == nil && provider == "local" {
+			c.JSON(http.StatusConflict, gin.H{"error": "Un compte avec cet email existe déjà"})
+			return
+		}
 	}
 
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 
-	// ✅ Crée l'utilisateur avec rôle "pending" (sera défini dans CompleteProfile)
-	id := primitive.NewObjectID().Hex()
+	// ✅ Crée l'utilisateur avec rôle "pending"
+	userID := gocql.TimeUUID()
+	userIDStr := userID.String()
 	isAdmin := false
+	now := time.Now()
+
+	// Insert dans users
+	err = session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, input.Email, string(hashedPassword), input.Name, "pending", "local", "", nil, "", isAdmin, now, now).Exec()
+	if err != nil {
+		log.Printf("❌ Erreur insertion utilisateur: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création utilisateur"})
+		return
+	}
+
+	// Insert dans users_by_email pour index
+	err = session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", input.Email, userID).Exec()
+	if err != nil {
+		log.Printf("⚠️ Erreur insertion index email: %v", err)
+	}
+
 	user := models.User{
-		ID:             id,
+		ID:             userIDStr,
 		Name:           input.Name,
 		Email:          input.Email,
 		Password:       string(hashedPassword),
-		Role:           "pending", // ✅ En attente de completion
+		Role:           "pending",
 		Provider:       "local",
 		IsCompanyAdmin: &isAdmin,
 		CompanyID:      nil,
 		CompanyName:    "",
 	}
 
-	if _, err := database.MongoAuthDB.Collection("users").InsertOne(ctx, user); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création utilisateur"})
-		return
-	}
-
 	token := generateJWT(user)
 
 	log.Printf("✅ Utilisateur créé: %s avec rôle pending", user.Email)
 
-	// ✅ Réponse minimale : juste le token
 	c.JSON(http.StatusCreated, gin.H{
 		"token": token,
 		"email": user.Email,
@@ -99,16 +118,67 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var user models.User
-	err := database.MongoAuthDB.Collection("users").
-		FindOne(ctx, bson.M{"email": input.Email, "provider": "local"}).
-		Decode(&user)
-	if err != nil || bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)) != nil {
+	// Récupérer user_id depuis users_by_email
+	var userID gocql.UUID
+	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&userID)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
 		return
+	}
+
+	// Récupérer les détails complets
+	var (
+		email, password, name, role, provider, providerID string
+		companyID                                         *gocql.UUID
+		companyName                                       string
+		isCompanyAdmin                                    bool
+		createdAt, updatedAt                              time.Time
+	)
+
+	err = session.Query(`SELECT email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at 
+	                     FROM users WHERE user_id = ?`, userID).Scan(
+		&email, &password, &name, &role, &provider, &providerID, &companyID, &companyName, &isCompanyAdmin, &createdAt, &updatedAt)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
+		return
+	}
+
+	// Vérifier le provider
+	if provider != "local" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
+		return
+	}
+
+	// Vérifier le mot de passe
+	if bcrypt.CompareHashAndPassword([]byte(password), []byte(input.Password)) != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
+		return
+	}
+
+	var companyIDStr *string
+	if companyID != nil {
+		s := companyID.String()
+		companyIDStr = &s
+	}
+
+	user := models.User{
+		ID:             userID.String(),
+		Name:           name,
+		Email:          email,
+		Password:       password,
+		Role:           role,
+		Provider:       provider,
+		ProviderID:     providerID,
+		CompanyID:      companyIDStr,
+		CompanyName:    companyName,
+		IsCompanyAdmin: &isCompanyAdmin,
 	}
 
 	token := generateJWT(user)
@@ -331,47 +401,86 @@ func FacebookMobileLogin(c *gin.Context) {
 // ================== UTILITAIRES ==================
 
 func findOrCreateOAuthUser(provider, providerID, email, name string) models.User {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	col := database.MongoAuthDB.Collection("users")
-	var user models.User
-
-	// 1️⃣ Recherche par provider_id
-	err := col.FindOne(ctx, bson.M{"provider": provider, "provider_id": providerID}).Decode(&user)
-	if err == mongo.ErrNoDocuments {
-		// 2️⃣ Sinon, recherche par email
-		err = col.FindOne(ctx, bson.M{"email": email}).Decode(&user)
-		if err == mongo.ErrNoDocuments {
-			// 3️⃣ Création d'un nouvel utilisateur OAuth avec rôle "pending"
-			id := primitive.NewObjectID().Hex()
-			isAdmin := false
-			user = models.User{
-				ID:             id,
-				Email:          email,
-				Name:           name,
-				Provider:       provider,
-				ProviderID:     providerID,
-				Role:           "pending", // ✅ Rôle temporaire jusqu'à completion du profil
-				IsCompanyAdmin: &isAdmin,
-			}
-			_, _ = col.InsertOne(ctx, user)
-			log.Printf("🆕 Utilisateur OAuth créé (%s) avec rôle pending : %s", provider, email)
-		} else {
-			// 4️⃣ Si utilisateur existant → on met à jour son provider
-			_, _ = col.UpdateOne(ctx, bson.M{"email": email}, bson.M{
-				"$set": bson.M{
-					"provider":    provider,
-					"provider_id": providerID,
-					"name":        name,
-				},
-			})
-			log.Printf("🔄 Compte existant fusionné avec provider %s : %s", provider, email)
-		}
-	} else {
-		log.Printf("✅ Utilisateur OAuth existant trouvé : %s", email)
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		return models.User{}
 	}
 
+	var user models.User
+	var userID gocql.UUID
+
+	// 1️⃣ Recherche par provider et provider_id (nécessite une table d'index ou scan)
+	// Pour simplifier, on cherche d'abord par email
+	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", email).Scan(&userID)
+	if err == nil {
+		// Utilisateur existe, récupérer les détails
+		var (
+			emailDB, password, nameDB, role, providerDB, providerIDDB string
+			companyID                                                 *gocql.UUID
+			companyName                                               string
+			isCompanyAdmin                                            bool
+			createdAt, updatedAt                                      time.Time
+		)
+		err = session.Query(`SELECT email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at 
+		                     FROM users WHERE user_id = ?`, userID).Scan(
+			&emailDB, &password, &nameDB, &role, &providerDB, &providerIDDB, &companyID, &companyName, &isCompanyAdmin, &createdAt, &updatedAt)
+		if err == nil {
+			// Mettre à jour le provider si différent
+			if providerDB != provider || providerIDDB != providerID {
+				now := time.Now()
+				session.Query(`UPDATE users SET provider = ?, provider_id = ?, name = ?, updated_at = ? WHERE user_id = ?`,
+					provider, providerID, name, now, userID).Exec()
+				log.Printf("🔄 Compte existant fusionné avec provider %s : %s", provider, email)
+			}
+			var companyIDStr *string
+			if companyID != nil {
+				s := companyID.String()
+				companyIDStr = &s
+			}
+			user = models.User{
+				ID:             userID.String(),
+				Email:          emailDB,
+				Name:           nameDB,
+				Password:       password,
+				Role:           role,
+				Provider:       provider,
+				ProviderID:     providerID,
+				CompanyID:      companyIDStr,
+				CompanyName:    companyName,
+				IsCompanyAdmin: &isCompanyAdmin,
+			}
+			log.Printf("✅ Utilisateur OAuth existant trouvé : %s", email)
+			return user
+		}
+	}
+
+	// 3️⃣ Création d'un nouvel utilisateur OAuth avec rôle "pending"
+	userID = gocql.TimeUUID()
+	isAdmin := false
+	now := time.Now()
+
+	err = session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		userID, email, "", name, "pending", provider, providerID, nil, "", isAdmin, now, now).Exec()
+	if err != nil {
+		log.Printf("❌ Erreur création utilisateur OAuth: %v", err)
+		return models.User{}
+	}
+
+	// Insert dans users_by_email
+	session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", email, userID).Exec()
+
+	user = models.User{
+		ID:             userID.String(),
+		Email:          email,
+		Name:           name,
+		Provider:       provider,
+		ProviderID:     providerID,
+		Role:           "pending",
+		IsCompanyAdmin: &isAdmin,
+	}
+	log.Printf("🆕 Utilisateur OAuth créé (%s) avec rôle pending : %s", provider, email)
 	return user
 }
 
@@ -434,7 +543,6 @@ func handleOAuthUser(c *gin.Context, provider, providerID, email, name, state st
 }
 
 func generateJWT(user models.User) string {
-	// *bool -> bool (default false si nil)
 	isAdmin := false
 	if user.IsCompanyAdmin != nil {
 		isAdmin = *user.IsCompanyAdmin
@@ -490,32 +598,30 @@ func CompleteProfile(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
 	id := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
 
-	// Crée la company si admin
+	// Crée la company si admin (pour l'instant, on stocke juste l'ID comme string)
 	var companyID *string
 	if input.IsCompanyAdmin && input.CompanyName != "" {
-		company := bson.M{
-			"name":              input.CompanyName,
-			"billingStreet":     input.BillingStreet,
-			"billingPostalCode": input.BillingPostalCode,
-			"billingCity":       input.BillingCity,
-			"billingCountry":    input.BillingCountry,
-			"createdAt":         primitive.NewDateTimeFromTime(time.Now()),
-		}
-		result, err := database.MongoCompanyDB.Collection("companies").InsertOne(ctx, company)
-		if err == nil {
-			if oid, ok := result.InsertedID.(primitive.ObjectID); ok {
-				h := oid.Hex()
-				companyID = &h
-				log.Printf("✅ Company créée: %s", h)
-			}
-		} else {
-			log.Printf("❌ Erreur création company: %v", err)
-		}
+		// TODO: Créer une table companies dans ScyllaDB si nécessaire
+		// Pour l'instant, on génère juste un UUID
+		companyUUID := gocql.TimeUUID()
+		companyIDStr := companyUUID.String()
+		companyID = &companyIDStr
+		log.Printf("✅ Company ID généré: %s", companyIDStr)
 	}
 
 	// ✅ Définit le rôle selon le type de compte
@@ -525,28 +631,18 @@ func CompleteProfile(c *gin.Context) {
 	}
 
 	// Met à jour l'utilisateur
-	update := bson.M{
-		"$set": bson.M{
-			"name":           input.Name,
-			"isCompanyAdmin": input.IsCompanyAdmin,
-			"companyName":    input.CompanyName,
-			"role":           role, // ✅ Mise à jour du rôle
-		},
-	}
-
+	now := time.Now()
+	var companyUUID *gocql.UUID
 	if companyID != nil {
-		update["$set"].(bson.M)["companyId"] = *companyID
-	}
-
-	col := database.MongoAuthDB.Collection("users")
-	_, err := col.UpdateOne(ctx, bson.M{"_id": id}, update)
-	if err != nil {
-		// Essaie avec ObjectID si la string ne marche pas
-		if oid, e := primitive.ObjectIDFromHex(id); e == nil {
-			_, err = col.UpdateOne(ctx, bson.M{"_id": oid}, update)
+		cid, err := uuid.Parse(*companyID)
+		if err == nil {
+			cu := gocql.UUID(cid)
+			companyUUID = &cu
 		}
 	}
 
+	err = session.Query(`UPDATE users SET name = ?, is_company_admin = ?, company_name = ?, role = ?, company_id = ?, updated_at = ? WHERE user_id = ?`,
+		input.Name, input.IsCompanyAdmin, input.CompanyName, role, companyUUID, now, userUUID).Exec()
 	if err != nil {
 		log.Printf("❌ Erreur mise à jour: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur mise à jour profil"})
@@ -569,36 +665,52 @@ func Me(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	id := fmt.Sprintf("%v", userID)
-
-	var user models.User
-	col := database.MongoAuthDB.Collection("users")
-
-	err := col.FindOne(ctx, bson.M{"_id": id}).Decode(&user)
+	session, err := database.GetUsersSession()
 	if err != nil {
-		if oid, e := primitive.ObjectIDFromHex(id); e == nil {
-			err = col.FindOne(ctx, bson.M{"_id": oid}).Decode(&user)
-		}
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
 	}
 
+	id := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
+
+	var (
+		email, password, name, role, provider, providerID string
+		companyID                                         *gocql.UUID
+		companyName                                       string
+		isCompanyAdmin                                    bool
+		createdAt, updatedAt                              time.Time
+	)
+
+	err = session.Query(`SELECT email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at 
+	                     FROM users WHERE user_id = ?`, userUUID).Scan(
+		&email, &password, &name, &role, &provider, &providerID, &companyID, &companyName, &isCompanyAdmin, &createdAt, &updatedAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Utilisateur introuvable"})
 		return
 	}
 
-	// ✅ Utilise "userId" au lieu de "user_id" pour cohérence
+	var companyIDStr *string
+	if companyID != nil {
+		s := companyID.String()
+		companyIDStr = &s
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"userId":         user.ID, // ✅ Change ici
-		"name":           user.Name,
-		"email":          user.Email,
-		"role":           user.Role,
-		"companyId":      user.CompanyID,
-		"companyName":    user.CompanyName,
-		"isCompanyAdmin": user.IsCompanyAdmin,
-		"provider":       user.Provider,
+		"userId":         id,
+		"name":           name,
+		"email":          email,
+		"role":           role,
+		"companyId":      companyIDStr,
+		"companyName":    companyName,
+		"isCompanyAdmin": isCompanyAdmin,
+		"provider":       provider,
 	})
 }
 
@@ -619,20 +731,34 @@ func MergeAccount(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var user models.User
-	err := database.MongoAuthDB.Collection("users").
-		FindOne(ctx, bson.M{"_id": userID}).Decode(&user)
-	if err != nil || user.Email != input.Email {
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
+
+	// Vérifier que l'email correspond
+	var email string
+	err = session.Query("SELECT email FROM users WHERE user_id = ?", userUUID).Scan(&email)
+	if err != nil || email != input.Email {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Email non autorisé"})
 		return
 	}
 
-	update := bson.M{"$set": bson.M{"provider": input.Provider, "provider_id": input.ProviderID}}
-	_, err = database.MongoAuthDB.Collection("users").UpdateOne(ctx, bson.M{"_id": userID}, update)
+	// Mettre à jour le provider
+	now := time.Now()
+	err = session.Query(`UPDATE users SET provider = ?, provider_id = ?, updated_at = ? WHERE user_id = ?`,
+		input.Provider, input.ProviderID, now, userUUID).Exec()
 	if err != nil {
+		log.Printf("❌ Erreur mise à jour provider: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur fusion"})
 		return
 	}

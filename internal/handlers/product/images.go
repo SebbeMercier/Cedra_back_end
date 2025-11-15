@@ -8,19 +8,17 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"cedra_back_end/internal/database"
 	services "cedra_back_end/internal/services"
 )
 
-//
 // =========================
 // 🟢 UPLOAD IMAGE PRODUIT
 // =========================
-//
 func UploadProductImage(c *gin.Context) {
 	ctx := context.Background()
 
@@ -37,7 +35,7 @@ func UploadProductImage(c *gin.Context) {
 		return
 	}
 
-	objID, err := primitive.ObjectIDFromHex(productID[0])
+	productUUID, err := uuid.Parse(productID[0])
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ID produit invalide"})
 		return
@@ -53,7 +51,7 @@ func UploadProductImage(c *gin.Context) {
 		defer file.Close()
 
 		objectName := fmt.Sprintf("products/%d-%s", time.Now().UnixNano(), fileHeader.Filename)
-		_, err = database.MinioClient.PutObject(
+		_, err = database.MinIO.PutObject(
 			ctx,
 			os.Getenv("MINIO_BUCKET"),
 			objectName,
@@ -78,53 +76,67 @@ func UploadProductImage(c *gin.Context) {
 		return
 	}
 
-	// 🔹 Ajout en masse dans MongoDB
-	collection := database.MongoProductsDB.Collection("products")
-	_, err = collection.UpdateOne(
-		ctx,
-		bson.M{"_id": objID},
-		bson.M{"$push": bson.M{"image_urls": bson.M{"$each": uploadedURLs}}},
-	)
+	// 🔹 Ajout en masse dans ScyllaDB
+	session, err := database.GetProductsSession()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur mise à jour MongoDB"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
+
+	// Récupérer les URLs existantes
+	var existingURLs []string
+	err = session.Query("SELECT image_urls FROM products WHERE product_id = ?", gocql.UUID(productUUID)).Scan(&existingURLs)
+	if err != nil && err != gocql.ErrNotFound {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur récupération produit"})
+		return
+	}
+
+	// Fusionner les URLs existantes avec les nouvelles
+	allURLs := append(existingURLs, uploadedURLs...)
+
+	// Mettre à jour le produit
+	err = session.Query("UPDATE products SET image_urls = ? WHERE product_id = ?", allURLs, gocql.UUID(productUUID)).Exec()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur mise à jour ScyllaDB"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":     "✅ Images uploadées avec succès",
-		"uploaded":    uploadedURLs,
-		"product_id":  productID[0],
-		"count":       len(uploadedURLs),
+		"message":    "✅ Images uploadées avec succès",
+		"uploaded":   uploadedURLs,
+		"product_id": productID[0],
+		"count":      len(uploadedURLs),
 	})
 }
 
-//
 // =========================
 // 🟡 LISTER LES IMAGES D’UN PRODUIT
 // =========================
-//
 func GetProductImages(c *gin.Context) {
 	ctx := context.Background()
 	productID := c.Param("productId")
 
-	objID, err := primitive.ObjectIDFromHex(productID)
+	productUUID, err := uuid.Parse(productID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ID produit invalide"})
 		return
 	}
 
-	collection := database.MongoProductsDB.Collection("products")
-	var product struct {
-		ImageURLs []string `bson:"image_urls"`
+	session, err := database.GetProductsSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
 	}
-	err = collection.FindOne(ctx, bson.M{"_id": objID}).Decode(&product)
+
+	var imageURLs []string
+	err = session.Query("SELECT image_urls FROM products WHERE product_id = ?", gocql.UUID(productUUID)).Scan(&imageURLs)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Produit introuvable"})
 		return
 	}
 
 	signedURLs := []string{}
-	for _, rawURL := range product.ImageURLs {
+	for _, rawURL := range imageURLs {
 		if len(rawURL) == 0 {
 			continue
 		}
@@ -149,17 +161,15 @@ func GetProductImages(c *gin.Context) {
 	})
 }
 
-//
 // =========================
 // 🔴 SUPPRIMER UNE IMAGE
 // =========================
-//
 func DeleteProductImage(c *gin.Context) {
 	ctx := context.Background()
 	imageID := c.Param("id") // ex: products/172928721234-tournevis.jpg
 
 	// Supprime l'objet de MinIO
-	err := database.MinioClient.RemoveObject(
+	err := database.MinIO.RemoveObject(
 		ctx,
 		os.Getenv("MINIO_BUCKET"),
 		imageID,
@@ -170,22 +180,58 @@ func DeleteProductImage(c *gin.Context) {
 		return
 	}
 
-	// Supprime aussi l’URL du champ image_urls dans MongoDB
+	// Supprime aussi l'URL du champ image_urls dans ScyllaDB
 	imageURL := fmt.Sprintf("http://%s/%s/%s",
 		os.Getenv("MINIO_ENDPOINT"),
 		os.Getenv("MINIO_BUCKET"),
 		imageID,
 	)
 
-	collection := database.MongoProductsDB.Collection("products")
-	_, err = collection.UpdateMany(
-		ctx,
-		bson.M{"image_urls": imageURL},
-		bson.M{"$pull": bson.M{"image_urls": imageURL}},
-	)
+	session, err := database.GetProductsSession()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur suppression MongoDB"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
 		return
+	}
+
+	// Récupérer tous les produits qui contiennent cette URL (peut nécessiter ALLOW FILTERING)
+	// Pour l'instant, on va chercher tous les produits et filtrer en mémoire
+	// Note: Pour de meilleures performances, on pourrait créer une table d'index
+	iter := session.Query("SELECT product_id, image_urls FROM products").Iter()
+	var (
+		prodID   gocql.UUID
+		prodURLs []string
+	)
+	productsToUpdate := []gocql.UUID{}
+	for iter.Scan(&prodID, &prodURLs) {
+		// Vérifier si l'URL est dans la liste
+		for _, url := range prodURLs {
+			if url == imageURL {
+				productsToUpdate = append(productsToUpdate, prodID)
+				break
+			}
+		}
+	}
+	iter.Close()
+
+	// Mettre à jour chaque produit pour retirer l'URL
+	for _, prodID := range productsToUpdate {
+		// Récupérer les URLs actuelles
+		var currentURLs []string
+		err = session.Query("SELECT image_urls FROM products WHERE product_id = ?", prodID).Scan(&currentURLs)
+		if err != nil {
+			continue
+		}
+
+		// Filtrer l'URL à supprimer
+		filteredURLs := []string{}
+		for _, url := range currentURLs {
+			if url != imageURL {
+				filteredURLs = append(filteredURLs, url)
+			}
+		}
+
+		// Mettre à jour
+		session.Query("UPDATE products SET image_urls = ? WHERE product_id = ?", filteredURLs, prodID).Exec()
 	}
 
 	c.JSON(http.StatusOK, gin.H{

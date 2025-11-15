@@ -1,17 +1,15 @@
 package user
 
 import (
-	"context"
 	"log"
 	"net/http"
-	"time"
 
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 )
 
 //
@@ -30,33 +28,76 @@ func ListMyAddresses(c *gin.Context) {
 		return
 	}
 
-	col := database.MongoAddressesDB.Collection("addresses")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur connexion base de données"})
+		return
+	}
 
 	// 🔍 Recherche toutes les adresses personnelles OU liées à la société
-	filter := bson.M{
-		"$or": []bson.M{
-			{"userId": userID},
-			{"companyId": companyID},
-		},
-		"type": bson.M{"$ne": "billing"}, // exclut les adresses de facturation
-	}
-
-	cursor, err := col.Find(ctx, filter)
-	if err != nil {
-		log.Println("❌ Erreur Mongo Find:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur de lecture"})
-		return
-	}
-	defer cursor.Close(ctx)
-
+	// Note: ScyllaDB ne supporte pas $or facilement, on fait deux requêtes
 	var results []models.Address
-	if err := cursor.All(ctx, &results); err != nil {
-		log.Println("❌ Erreur décodage:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur décodage adresses"})
-		return
+
+	// Adresses personnelles
+	iter := session.Query("SELECT address_id, user_id, company_id, street, postal_code, city, country, type, is_default FROM addresses WHERE user_id = ? AND type != ? ALLOW FILTERING", userID, "billing").Iter()
+	var (
+		addressID gocql.UUID
+		userIDDB, companyIDDB, street, postalCode, city, country, typeAddr string
+		isDefault bool
+	)
+	for iter.Scan(&addressID, &userIDDB, &companyIDDB, &street, &postalCode, &city, &country, &typeAddr, &isDefault) {
+		var companyIDPtr *string
+		if companyIDDB != "" {
+			companyIDPtr = &companyIDDB
+		}
+		results = append(results, models.Address{
+			ID:         addressID,
+			UserID:     userIDDB,
+			CompanyID:  companyIDPtr,
+			Street:     street,
+			PostalCode: postalCode,
+			City:       city,
+			Country:    country,
+			Type:       typeAddr,
+			IsDefault:  isDefault,
+		})
+	}
+	if err := iter.Close(); err != nil {
+		log.Printf("⚠️ Erreur fermeture iter: %v", err)
+	}
+
+	// Si companyID est fourni, chercher aussi les adresses de la société
+	if companyID != "" {
+		iter2 := session.Query("SELECT address_id, user_id, company_id, street, postal_code, city, country, type, is_default FROM addresses WHERE company_id = ? AND type != ? ALLOW FILTERING", companyID, "billing").Iter()
+		for iter2.Scan(&addressID, &userIDDB, &companyIDDB, &street, &postalCode, &city, &country, &typeAddr, &isDefault) {
+			var companyIDPtr *string
+			if companyIDDB != "" {
+				companyIDPtr = &companyIDDB
+			}
+			// Éviter les doublons
+			found := false
+			for _, r := range results {
+				if r.ID == addressID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				results = append(results, models.Address{
+					ID:         addressID,
+					UserID:     userIDDB,
+					CompanyID:  companyIDPtr,
+					Street:     street,
+					PostalCode: postalCode,
+					City:       city,
+					Country:    country,
+					Type:       typeAddr,
+					IsDefault:  isDefault,
+				})
+			}
+		}
+		iter2.Close()
 	}
 
 	log.Printf("✅ %d adresses trouvées pour user %s", len(results), userID)
@@ -73,7 +114,12 @@ func CreateAddress(c *gin.Context) {
 		return
 	}
 
-	col := database.MongoAddressesDB.Collection("addresses")
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur connexion base de données"})
+		return
+	}
 
 	var input models.Address
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -87,16 +133,21 @@ func CreateAddress(c *gin.Context) {
 		input.Type = "user"
 	}
 
-	input.ID = primitive.NewObjectID()
+	addressID := gocql.TimeUUID()
+	input.ID = addressID
 	input.UserID = userID
 	input.IsDefault = false
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	var companyIDStr string
+	if input.CompanyID != nil {
+		companyIDStr = *input.CompanyID
+	}
 
-	_, err := col.InsertOne(ctx, input)
+	err = session.Query(`INSERT INTO addresses (address_id, user_id, company_id, street, postal_code, city, country, type, is_default) 
+	                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		addressID, userID, companyIDStr, input.Street, input.PostalCode, input.City, input.Country, input.Type, false).Exec()
 	if err != nil {
-		log.Println("❌ Erreur Mongo InsertOne:", err)
+		log.Printf("❌ Erreur insertion adresse: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Impossible d'ajouter l'adresse"})
 		return
 	}
@@ -111,34 +162,44 @@ func CreateAddress(c *gin.Context) {
 func MakeDefaultAddress(c *gin.Context) {
 	idParam := c.Param("id")
 	userID := c.GetString("user_id")
-	col := database.MongoAddressesDB.Collection("addresses")
 
-	objectID, err := primitive.ObjectIDFromHex(idParam)
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur connexion base de données"})
+		return
+	}
+
+	addressID, err := uuid.Parse(idParam)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "ID invalide"})
 		return
 	}
+	addressUUID := gocql.UUID(addressID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// Désactiver tous les autres
-	_, _ = col.UpdateMany(ctx, bson.M{"userId": userID}, bson.M{"$set": bson.M{"isDefault": false}})
-
-	// Activer celui-ci
-	result, err := col.UpdateOne(ctx,
-		bson.M{"_id": objectID, "userId": userID},
-		bson.M{"$set": bson.M{"isDefault": true}},
-	)
-
-	if err != nil {
-		log.Println("❌ Erreur UpdateOne:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Impossible de définir par défaut"})
+	// Vérifier que l'adresse appartient à l'utilisateur
+	var userIDDB string
+	err = session.Query("SELECT user_id FROM addresses WHERE address_id = ?", addressUUID).Scan(&userIDDB)
+	if err != nil || userIDDB != userID {
+		c.JSON(http.StatusNotFound, gin.H{"message": "Adresse non trouvée"})
 		return
 	}
 
-	if result.MatchedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"message": "Adresse non trouvée"})
+	// Désactiver tous les autres (nécessite un scan car ScyllaDB ne supporte pas UPDATE WHERE avec condition)
+	iter := session.Query("SELECT address_id FROM addresses WHERE user_id = ? ALLOW FILTERING", userID).Iter()
+	var otherID gocql.UUID
+	for iter.Scan(&otherID) {
+		if otherID != addressUUID {
+			session.Query("UPDATE addresses SET is_default = ? WHERE address_id = ?", false, otherID).Exec()
+		}
+	}
+	iter.Close()
+
+	// Activer celui-ci
+	err = session.Query("UPDATE addresses SET is_default = ? WHERE address_id = ?", true, addressUUID).Exec()
+	if err != nil {
+		log.Printf("❌ Erreur UpdateOne: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Impossible de définir par défaut"})
 		return
 	}
 
@@ -149,26 +210,34 @@ func MakeDefaultAddress(c *gin.Context) {
 func DeleteAddress(c *gin.Context) {
 	idParam := c.Param("id")
 	userID := c.GetString("user_id")
-	col := database.MongoAddressesDB.Collection("addresses")
 
-	objectID, err := primitive.ObjectIDFromHex(idParam)
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Erreur connexion base de données"})
+		return
+	}
+
+	addressID, err := uuid.Parse(idParam)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "ID invalide"})
 		return
 	}
+	addressUUID := gocql.UUID(addressID)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	result, err := col.DeleteOne(ctx, bson.M{"_id": objectID, "userId": userID})
-	if err != nil {
-		log.Println("❌ Erreur DeleteOne:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Suppression impossible"})
+	// Vérifier que l'adresse appartient à l'utilisateur
+	var userIDDB string
+	err = session.Query("SELECT user_id FROM addresses WHERE address_id = ?", addressUUID).Scan(&userIDDB)
+	if err != nil || userIDDB != userID {
+		c.JSON(http.StatusNotFound, gin.H{"message": "Adresse non trouvée"})
 		return
 	}
 
-	if result.DeletedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"message": "Adresse non trouvée"})
+	// Supprimer l'adresse
+	err = session.Query("DELETE FROM addresses WHERE address_id = ?", addressUUID).Exec()
+	if err != nil {
+		log.Printf("❌ Erreur DeleteOne: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "Suppression impossible"})
 		return
 	}
 

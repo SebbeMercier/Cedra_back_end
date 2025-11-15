@@ -26,6 +26,7 @@ func RegisterRoutes(router *gin.Engine) {
 		auth.POST("/merge", middleware.AuthRequired(), user.MergeAccount)
 		auth.POST("/complete", middleware.AuthRequired(), user.CompleteProfile)
 		auth.POST("/change-password", middleware.AuthRequired(), user.ChangePassword) // ✅ Avec ancien mot de passe
+		auth.DELETE("/delete-account", middleware.AuthRequired(), user.DeleteAccount) // ✅ Supprimer le compte
 
 		// 🔹 Réinitialisation de mot de passe (SANS authentification)
 		auth.POST("/forgot-password", user.ForgotPassword) // ✅ Demande de reset

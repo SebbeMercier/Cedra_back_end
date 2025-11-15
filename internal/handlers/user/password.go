@@ -2,7 +2,6 @@ package user
 
 import (
 	"cedra_back_end/internal/database"
-	"cedra_back_end/internal/models"
 	"cedra_back_end/internal/utils"
 	"context"
 	"crypto/rand"
@@ -14,7 +13,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"go.mongodb.org/mongo-driver/bson"
+	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -43,28 +43,36 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
 	id := fmt.Sprintf("%v", userID)
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
 
-	var user models.User
-	col := database.MongoAuthDB.Collection("users")
-
-	err := col.FindOne(ctx, bson.M{"_id": id}).Decode(&user)
+	var password, provider string
+	err = session.Query("SELECT password, provider FROM users WHERE user_id = ?", userUUID).Scan(&password, &provider)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Utilisateur introuvable"})
 		return
 	}
 
 	// Vérifie que c'est un compte local (pas OAuth)
-	if user.Provider != "local" {
+	if provider != "local" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Les comptes OAuth ne peuvent pas changer de mot de passe ici"})
 		return
 	}
 
 	// Vérifie l'ancien mot de passe
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.OldPassword)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(password), []byte(input.OldPassword)); err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Ancien mot de passe incorrect"})
 		return
 	}
@@ -77,16 +85,16 @@ func ChangePassword(c *gin.Context) {
 	}
 
 	// Met à jour le mot de passe
-	_, err = col.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
-		"$set": bson.M{"password": string(hashedPassword)},
-	})
+	now := time.Now()
+	err = session.Query("UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?",
+		string(hashedPassword), now, userUUID).Exec()
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la mise à jour"})
 		return
 	}
 
-	log.Printf("✅ Mot de passe changé pour l'utilisateur %s", user.Email)
+	log.Printf("✅ Mot de passe changé pour l'utilisateur %s", id)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Mot de passe changé avec succès"})
 }
@@ -104,25 +112,46 @@ func ForgotPassword(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
 
-	var user models.User
-	col := database.MongoAuthDB.Collection("users")
-
-	err := col.FindOne(ctx, bson.M{"email": input.Email, "provider": "local"}).Decode(&user)
+	// Récupérer user_id depuis users_by_email
+	var userID gocql.UUID
+	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&userID)
 	if err != nil {
 		// ⚠️ Pour la sécurité, on ne révèle pas si l'email existe ou non
 		c.JSON(http.StatusOK, gin.H{"message": "Si cet email existe, un lien de réinitialisation a été envoyé"})
 		return
 	}
 
+	// Vérifier que c'est un compte local
+	var provider string
+	err = session.Query("SELECT provider FROM users WHERE user_id = ?", userID).Scan(&provider)
+	if err != nil || provider != "local" {
+		c.JSON(http.StatusOK, gin.H{"message": "Si cet email existe, un lien de réinitialisation a été envoyé"})
+		return
+	}
+
+	// Récupérer le nom pour l'email
+	var name string
+	err = session.Query("SELECT name FROM users WHERE user_id = ?", userID).Scan(&name)
+	if err != nil {
+		name = ""
+	}
+
+	userIDStr := userID.String()
+
 	// Génère un token de réinitialisation
 	resetToken := generateResetToken()
 	resetExpiry := time.Now().Add(1 * time.Hour) // Valide 1 heure
 
-	// Sauvegarde le token dans Redis (ou MongoDB si vous préférez)
-	err = database.RedisClient.Set(ctx, "reset_token:"+resetToken, user.ID, 1*time.Hour).Err()
+	// Sauvegarde le token dans Redis
+	ctx := context.Background()
+	err = database.RedisClient.Set(ctx, "reset_token:"+resetToken, userIDStr, 1*time.Hour).Err()
 	if err != nil {
 		log.Printf("❌ Erreur sauvegarde token reset: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la génération du lien"})
@@ -130,9 +159,9 @@ func ForgotPassword(c *gin.Context) {
 	}
 
 	// Envoie l'email
-	go sendPasswordResetEmail(user.Email, user.Name, resetToken)
+	go sendPasswordResetEmail(input.Email, name, resetToken)
 
-	log.Printf("✅ Email de réinitialisation envoyé à %s (token valide jusqu'à %s)", user.Email, resetExpiry.Format("15:04:05"))
+	log.Printf("✅ Email de réinitialisation envoyé à %s (token valide jusqu'à %s)", input.Email, resetExpiry.Format("15:04:05"))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Si cet email existe, un lien de réinitialisation a été envoyé"})
 }
@@ -171,13 +200,26 @@ func ResetPassword(c *gin.Context) {
 		return
 	}
 
-	// Met à jour le mot de passe
-	col := database.MongoAuthDB.Collection("users")
-	result, err := col.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
-		"$set": bson.M{"password": string(hashedPassword)},
-	})
+	// Parse userID
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID utilisateur invalide"})
+		return
+	}
+	userUUID := gocql.UUID(uid)
 
-	if err != nil || result.MatchedCount == 0 {
+	// Met à jour le mot de passe
+	session, err := database.GetUsersSession()
+	if err != nil {
+		log.Printf("❌ Erreur session ScyllaDB: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
+
+	now := time.Now()
+	err = session.Query("UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?",
+		string(hashedPassword), now, userUUID).Exec()
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la mise à jour"})
 		return
 	}
