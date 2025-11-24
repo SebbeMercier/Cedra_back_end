@@ -7,14 +7,14 @@ import (
 )
 
 type Product struct {
-	ID          gocql.UUID `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Price       float64    `json:"price"`
-	Stock       int        `json:"stock"`
-	CategoryID  gocql.UUID `json:"category_id,omitempty"`
-	ImageURLs   []string   `json:"image_urls"`
-	Tags        []string   `json:"tags,omitempty"`
-	CreatedAt   *time.Time `json:"created_at,omitempty"`
-	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+	ID          gocql.UUID `json:"id" db:"product_id"`
+	Name        string     `json:"name" db:"name"`
+	Description string     `json:"description" db:"description"`
+	Price       float64    `json:"price" db:"price"`
+	Stock       int        `json:"stock" db:"stock"`
+	CategoryID  gocql.UUID `json:"category_id" db:"category_id"`
+	ImageURLs   []string   `json:"image_urls" db:"image_urls"`
+	Tags        []string   `json:"tags" db:"tags"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"` // ✅ Pas de pointeur
+	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"` // ✅ Pas de pointeur
 }

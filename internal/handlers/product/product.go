@@ -25,6 +25,7 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
+	// ✅ Validations
 	if p.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Le champ 'name' est obligatoire"})
 		return
@@ -42,27 +43,36 @@ func CreateProduct(c *gin.Context) {
 		return
 	}
 
+	// ✅ Connexion ScyllaDB
 	session, err := database.GetProductsSession()
 	if err != nil {
+		log.Printf("❌ Erreur connexion ScyllaDB: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
 		return
 	}
 
+	// ✅ Vérifier que la catégorie existe
 	var categoryName string
 	if err := session.Query(`SELECT name FROM categories WHERE category_id = ?`, p.CategoryID).Scan(&categoryName); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Catégorie introuvable"})
 		return
 	}
 
+	// ✅ Générer ID et timestamps
 	p.ID = gocql.TimeUUID()
 	now := time.Now()
-	p.CreatedAt = &now
-	p.UpdatedAt = &now
+	p.CreatedAt = now
+	p.UpdatedAt = now
 
+	// ✅ Initialiser les slices vides
 	if len(p.ImageURLs) == 0 {
-		p.ImageURLs = []string{} // Liste vide
+		p.ImageURLs = []string{}
+	}
+	if len(p.Tags) == 0 {
+		p.Tags = []string{}
 	}
 
+	// ✅ Insérer dans la table principale
 	query := `INSERT INTO products (product_id, name, description, price, stock, category_id, image_urls, tags, created_at, updated_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
@@ -71,22 +81,33 @@ func CreateProduct(c *gin.Context) {
 		p.CategoryID, p.ImageURLs, p.Tags,
 		p.CreatedAt, p.UpdatedAt,
 	).Exec(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création produit: " + err.Error()})
+		log.Printf("❌ Erreur insertion produit: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création produit"})
 		return
 	}
 
-	if err := session.Query(
-		`INSERT INTO products_by_category (category_id, product_id, name, price, stock) VALUES (?, ?, ?, ?, ?)`,
-		p.CategoryID, p.ID, p.Name, p.Price, p.Stock,
-	).Exec(); err != nil {
-		fmt.Printf("⚠️ Erreur indexation products_by_category: %v\n", err)
+	// ✅ Indexation dans products_by_category (non bloquant)
+	go func() {
+		if err := session.Query(
+			`INSERT INTO products_by_category (category_id, product_id, name, price, stock) VALUES (?, ?, ?, ?, ?)`,
+			p.CategoryID, p.ID, p.Name, p.Price, p.Stock,
+		).Exec(); err != nil {
+			log.Printf("⚠️ Erreur indexation products_by_category: %v", err)
+		}
+	}()
+
+	// ✅ Indexation Elasticsearch (non bloquant)
+	go func() {
+		services.IndexProduct(p)
+	}()
+
+	// ✅ Invalider le cache Redis
+	if database.RedisClient != nil {
+		ctx := context.Background()
+		database.RedisClient.Del(ctx, "products:all")
 	}
 
-	go services.IndexProduct(p)
-
-	// ✅ Invalider le cache
-	database.RedisClient.Del(context.Background(), "products:all")
-
+	// ✅ Réponse de succès
 	c.JSON(http.StatusCreated, gin.H{
 		"message":    "✅ Produit créé avec succès",
 		"product_id": p.ID.String(),
@@ -128,14 +149,13 @@ func GetAllProducts(c *gin.Context) {
 	}
 
 	iter := session.Query(
-		`SELECT product_id, name, description, price, stock, category_id, company_id, image_urls, tags, created_at, updated_at 
-        FROM products`,
+		`SELECT product_id, name, description, price, stock, category_id, image_urls, tags, created_at, updated_at  FROM products`,
 	).Iter()
 
 	var products []models.Product
 	var p models.Product
 
-	for iter.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Stock, &p.CategoryID, &p.CompanyID, &p.ImageURLs, &p.Tags, &p.CreatedAt, &p.UpdatedAt) {
+	for iter.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Stock, &p.CategoryID, &p.ImageURLs, &p.Tags, &p.CreatedAt, &p.UpdatedAt) {
 		// ✅ Générer les URLs signées MinIO
 		signed := []string{}
 		for _, url := range p.ImageURLs {
@@ -226,9 +246,9 @@ func SearchProducts(c *gin.Context) {
 	var p models.Product
 
 	for iter.Scan(&p.ID, &p.Name, &p.Description, &p.Price, &p.Stock, &p.CategoryID, &p.ImageURLs, &p.Tags, &p.CreatedAt, &p.UpdatedAt) {
-		// Filtre en mémoire
+		// ✅ Filtre en mémoire (Description est maintenant un string, pas *string)
 		if containsIgnoreCase(p.Name, query) ||
-			(p.Description != nil && containsIgnoreCase(*p.Description, query)) ||
+			containsIgnoreCase(p.Description, query) ||
 			containsTagsIgnoreCase(p.Tags, query) {
 
 			// ✅ Générer URLs signées
@@ -260,21 +280,6 @@ func SearchProducts(c *gin.Context) {
 		"count":    len(products),
 		"source":   "scylladb",
 	})
-}
-
-// Helper pour recherche insensible à la casse
-func containsIgnoreCase(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
-}
-
-func containsTagsIgnoreCase(tags []string, query string) bool {
-	queryLower := strings.ToLower(query)
-	for _, tag := range tags {
-		if strings.Contains(strings.ToLower(tag), queryLower) {
-			return true
-		}
-	}
-	return false
 }
 
 func containsIgnoreCase(s, substr string) bool {
@@ -358,13 +363,20 @@ func GetProductsByCategory(c *gin.Context) {
 	for _, basicProd := range basicProducts {
 		var fullProd models.Product
 		err := session.Query(
-			`SELECT product_id, name, description, price, stock, category_id, company_id, image_urls, tags, created_at, updated_at 
+			`SELECT product_id, name, description, price, stock, category_id, image_urls, tags, created_at, updated_at 
             FROM products WHERE product_id = ?`,
 			basicProd.ID,
 		).Scan(
-			&fullProd.ID, &fullProd.Name, &fullProd.Description, &fullProd.Price, &fullProd.Stock,
-			&fullProd.CategoryID, &fullProd.CompanyID, &fullProd.ImageURLs, &fullProd.Tags,
-			&fullProd.CreatedAt, &fullProd.UpdatedAt,
+			&fullProd.ID,
+			&fullProd.Name,
+			&fullProd.Description,
+			&fullProd.Price,
+			&fullProd.Stock,
+			&fullProd.CategoryID, // ✅ Virgule ajoutée
+			&fullProd.ImageURLs,
+			&fullProd.Tags,
+			&fullProd.CreatedAt,
+			&fullProd.UpdatedAt,
 		)
 
 		if err == nil {
@@ -479,12 +491,12 @@ func GetBestSellers(c *gin.Context) {
 
 		var p models.Product
 		err = productsSession.Query(
-			`SELECT product_id, name, description, price, stock, category_id, company_id, image_urls, tags, created_at, updated_at 
+			`SELECT product_id, name, description, price, stock, category_id, image_urls, tags, created_at, updated_at 
             FROM products WHERE product_id = ?`,
 			productUUID,
 		).Scan(
 			&p.ID, &p.Name, &p.Description, &p.Price, &p.Stock,
-			&p.CategoryID, &p.CompanyID, &p.ImageURLs, &p.Tags,
+			&p.CategoryID, &p.ImageURLs, &p.Tags,
 			&p.CreatedAt, &p.UpdatedAt,
 		)
 

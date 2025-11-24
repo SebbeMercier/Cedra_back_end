@@ -68,7 +68,6 @@ func GetProductFull(c *gin.Context) {
 		&product.Price,
 		&product.Stock,
 		&product.CategoryID,
-		&product.CompanyID,
 		&product.ImageURLs,
 		&product.Tags,
 		&product.CreatedAt,
