@@ -13,7 +13,9 @@ import (
 	"github.com/gocql/gocql"
 )
 
-// 🟢 Créer une catégorie
+// =========================
+// 🟢 CRÉER UNE CATÉGORIE
+// =========================
 func CreateCategory(c *gin.Context) {
 	session, err := database.GetProductsSession()
 	if err != nil {
@@ -38,47 +40,64 @@ func CreateCategory(c *gin.Context) {
 	now := time.Now()
 	cat.CreatedAt = &now
 
-	// Insert dans categories
-	err = session.Query(`INSERT INTO categories (category_id, name, slug, description, parent_category_id, image_url, created_at) 
-	                     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		categoryID, cat.Name, cat.Slug, cat.Description, cat.ParentCategoryID, cat.ImageURL, now).Exec()
+	// Insertion dans categories
+	err = session.Query(
+		`INSERT INTO categories (category_id, name, slug, description, parent_category_id, image_url, created_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		categoryID, cat.Name, cat.Slug, cat.Description, cat.ParentCategoryID, cat.ImageURL, now,
+	).Exec()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création catégorie: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"id": categoryID.String()})
+	// Invalider le cache Redis
+	ctx := context.Background()
+	database.RedisClient.Del(ctx, "categories:all")
+
+	c.JSON(http.StatusCreated, gin.H{
+		"message": "✅ Catégorie créée avec succès",
+		"id":      categoryID.String(),
+		"name":    cat.Name,
+	})
 }
 
-// 🔵 Lister les catégories
+// =========================
+// 🔵 LISTER TOUTES LES CATÉGORIES
+// =========================
 func GetAllCategories(c *gin.Context) {
 	ctx := context.Background()
 	cacheKey := "categories:all"
 
-	// Cache Redis
+	// 1️⃣ Vérifier le cache Redis
 	val, err := database.RedisClient.Get(ctx, cacheKey).Result()
 	if err == nil {
 		var cached []models.Category
-		json.Unmarshal([]byte(val), &cached)
-		c.JSON(http.StatusOK, cached)
-		return
+		if json.Unmarshal([]byte(val), &cached) == nil {
+			c.JSON(http.StatusOK, cached)
+			return
+		}
 	}
 
+	// 2️⃣ Récupérer depuis ScyllaDB
 	session, err := database.GetProductsSession()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
 		return
 	}
 
-	// Récupérer toutes les catégories
 	var cats []models.Category
-	iter := session.Query("SELECT category_id, name, slug, description, parent_category_id, image_url, created_at FROM categories").Iter()
+	iter := session.Query(
+		"SELECT category_id, name, slug, description, parent_category_id, image_url, created_at FROM categories",
+	).Iter()
+
 	var (
 		categoryID                        gocql.UUID
 		name, slug, description, imageURL string
 		parentCategoryID                  *gocql.UUID
 		createdAt                         time.Time
 	)
+
 	for iter.Scan(&categoryID, &name, &slug, &description, &parentCategoryID, &imageURL, &createdAt) {
 		cat := models.Category{
 			ID:               categoryID,
@@ -91,14 +110,66 @@ func GetAllCategories(c *gin.Context) {
 		}
 		cats = append(cats, cat)
 	}
+
 	if err := iter.Close(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lecture catégories: " + err.Error()})
 		return
 	}
 
-	// Mettre en cache
+	// 3️⃣ Mettre en cache
 	data, _ := json.Marshal(cats)
-	database.RedisClient.Set(ctx, cacheKey, data, time.Hour)
+	database.RedisClient.Set(ctx, cacheKey, data, 1*time.Hour)
 
 	c.JSON(http.StatusOK, cats)
+}
+
+// =========================
+// 🟡 RÉCUPÉRER UNE CATÉGORIE PAR ID
+// =========================
+func GetCategoryByID(c *gin.Context) {
+	categoryID := c.Param("id")
+
+	uuid, err := gocql.ParseUUID(categoryID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ID catégorie invalide"})
+		return
+	}
+
+	session, err := database.GetProductsSession()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur connexion base de données"})
+		return
+	}
+
+	var (
+		name, slug, description, imageURL string
+		parentCategoryID                  *gocql.UUID
+		createdAt                         time.Time
+	)
+
+	err = session.Query(
+		"SELECT name, slug, description, parent_category_id, image_url, created_at FROM categories WHERE category_id = ?",
+		uuid,
+	).Scan(&name, &slug, &description, &parentCategoryID, &imageURL, &createdAt)
+
+	if err != nil {
+		if err == gocql.ErrNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Catégorie introuvable"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+
+	cat := models.Category{
+		ID:               uuid,
+		Name:             name,
+		Slug:             slug,
+		Description:      description,
+		ParentCategoryID: parentCategoryID,
+		ImageURL:         imageURL,
+		CreatedAt:        &createdAt,
+	}
+
+	c.JSON(http.StatusOK, cat)
 }
