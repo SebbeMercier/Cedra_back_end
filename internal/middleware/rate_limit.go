@@ -14,17 +14,17 @@ import (
 )
 
 const (
-	// Limites par endpoint
-	LoginMaxAttempts          = 5
-	RegisterMaxAttempts       = 3
-	ForgotPasswordMaxAttempts = 3
-	APIMaxRequests            = 100 // Par minute pour les endpoints généraux
+	// Limites par endpoint (ajustées pour usage réel app + web)
+	LoginMaxAttempts          = 5    // 5 tentatives de login échouées par email
+	RegisterMaxAttempts       = 10   // 10 inscriptions par IP par heure (usage normal)
+	ForgotPasswordMaxAttempts = 3    // 3 demandes de reset par email
+	APIMaxRequests            = 1000 // 1000 requêtes/min par IP (usage normal app/web)
 
 	// Durées de cooldown
-	LoginCooldown          = 15 * time.Minute
-	RegisterCooldown       = 30 * time.Minute
-	ForgotPasswordCooldown = 10 * time.Minute
-	APICooldown            = 1 * time.Minute
+	LoginCooldown          = 15 * time.Minute // 15 min après 5 échecs de login
+	RegisterCooldown       = 1 * time.Hour    // 1 heure pour les inscriptions
+	ForgotPasswordCooldown = 10 * time.Minute // 10 min pour forgot password
+	APICooldown            = 1 * time.Minute  // Fenêtre de 1 minute
 )
 
 // LoginRateLimit limite les tentatives de connexion par email
@@ -236,9 +236,9 @@ func CartRateLimit() gin.HandlerFunc {
 		ctx := context.Background()
 		key := "cart_add:" + userID
 
-		// Max 20 ajouts par minute
+		// Max 50 ajouts par minute (usage normal)
 		requests, _ := database.Redis.Get(ctx, key).Int()
-		if requests >= 20 {
+		if requests >= 50 {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":       "Trop d'ajouts au panier. Ralentissez un peu",
 				"retry_after": 60,
@@ -264,9 +264,9 @@ func SearchRateLimit() gin.HandlerFunc {
 		ctx := context.Background()
 		key := "search_requests:" + ip
 
-		// Max 30 recherches par minute
+		// Max 100 recherches par minute (usage normal)
 		requests, _ := database.Redis.Get(ctx, key).Int()
-		if requests >= 30 {
+		if requests >= 100 {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":       "Trop de recherches. Réessayez dans 1 minute",
 				"retry_after": 60,

@@ -51,26 +51,55 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 
-	// Vérifie si l'email existe déjà via users_by_email
-	var existingUserID gocql.UUID
-	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&existingUserID)
-	if err == nil {
-		// Vérifier aussi le provider
-		var provider string
-		err = session.Query("SELECT provider FROM users WHERE user_id = ?", existingUserID).Scan(&provider)
-		if err == nil && provider == "local" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Un compte avec cet email existe déjà"})
-			return
+	// ✅ Paralléliser la vérification email ET le hashing du mot de passe
+	type checkResult struct {
+		exists bool
+		err    error
+	}
+	checkChan := make(chan checkResult, 1)
+	hashChan := make(chan struct {
+		hash string
+		err  error
+	}, 1)
+
+	// Vérifier l'email en parallèle
+	go func() {
+		var existingUserID gocql.UUID
+		err := session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&existingUserID)
+		if err == nil {
+			// Vérifier aussi le provider
+			var provider string
+			err = session.Query("SELECT provider FROM users WHERE user_id = ?", existingUserID).Scan(&provider)
+			if err == nil && provider == "local" {
+				checkChan <- checkResult{exists: true, err: nil}
+				return
+			}
 		}
+		checkChan <- checkResult{exists: false, err: nil}
+	}()
+
+	// Hasher le mot de passe en parallèle
+	go func() {
+		hash, err := utils.HashPassword(input.Password)
+		hashChan <- struct {
+			hash string
+			err  error
+		}{hash: hash, err: err}
+	}()
+
+	// Attendre les résultats
+	checkRes := <-checkChan
+	if checkRes.exists {
+		c.JSON(http.StatusConflict, gin.H{"error": "Un compte avec cet email existe déjà"})
+		return
 	}
 
-	// ✅ Utiliser Argon2id pour de meilleures performances (~20-30ms au lieu de 50-60ms avec bcrypt)
-	// Argon2id est aussi plus sécurisé et recommandé par l'OWASP
-	hashedPassword, err := utils.HashPassword(input.Password)
-	if err != nil {
+	hashRes := <-hashChan
+	if hashRes.err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors du hachage du mot de passe"})
 		return
 	}
+	hashedPassword := hashRes.hash
 
 	// ✅ Crée l'utilisateur avec rôle "pending"
 	userID := gocql.TimeUUID()
@@ -78,19 +107,29 @@ func CreateUser(c *gin.Context) {
 	isAdmin := false
 	now := time.Now()
 
-	// ✅ Insertions en parallèle pour améliorer les performances
+	// ✅ Insertions en parallèle avec prepared statements
 	errChan := make(chan error, 2)
 
-	// Insert dans users
+	// Insert dans users (utiliser prepared statement si disponible)
 	go func() {
-		errChan <- session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			userID, input.Email, hashedPassword, input.Name, "pending", "local", "", nil, "", isAdmin, now, now).Exec()
+		stmt := database.GetPreparedInsertUser()
+		if stmt != nil {
+			errChan <- stmt.Bind(userID, input.Email, hashedPassword, input.Name, "pending", "local", "", nil, "", isAdmin, now, now).Exec()
+		} else {
+			errChan <- session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				userID, input.Email, hashedPassword, input.Name, "pending", "local", "", nil, "", isAdmin, now, now).Exec()
+		}
 	}()
 
-	// Insert dans users_by_email pour index
+	// Insert dans users_by_email (utiliser prepared statement si disponible)
 	go func() {
-		errChan <- session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", input.Email, userID).Exec()
+		stmt := database.GetPreparedInsertUserByEmail()
+		if stmt != nil {
+			errChan <- stmt.Bind(input.Email, userID).Exec()
+		} else {
+			errChan <- session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", input.Email, userID).Exec()
+		}
 	}()
 
 	// Attendre les 2 insertions
@@ -116,7 +155,17 @@ func CreateUser(c *gin.Context) {
 
 	token := generateJWT(user)
 
-	log.Printf("✅ Utilisateur créé: %s avec rôle pending", user.Email)
+	// ✅ Pré-charger le cache utilisateur pour les prochaines requêtes (async)
+	go func() {
+		ctx := context.Background()
+		jsonData, _ := json.Marshal(user)
+		database.Redis.Set(ctx, "user:"+userIDStr, jsonData, 5*time.Minute)
+	}()
+
+	// Log seulement en mode debug
+	if os.Getenv("DEBUG") == "true" {
+		log.Printf("✅ Utilisateur créé: %s avec rôle pending", user.Email)
+	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"token": token,
@@ -217,6 +266,14 @@ func Login(c *gin.Context) {
 	}
 
 	token := generateJWT(user)
+
+	// ✅ Pré-charger le cache utilisateur pour les prochaines requêtes (async)
+	go func() {
+		ctx := context.Background()
+		jsonData, _ := json.Marshal(user)
+		database.Redis.Set(ctx, "user:"+user.ID, jsonData, 5*time.Minute)
+	}()
+
 	c.JSON(http.StatusOK, gin.H{
 		"token":          token,
 		"userId":         user.ID,
@@ -640,15 +697,37 @@ func CompleteProfile(c *gin.Context) {
 	}
 	userUUID := gocql.UUID(uid)
 
-	// Crée la company si admin (pour l'instant, on stocke juste l'ID comme string)
+	// ✅ Crée la company si admin
 	var companyID *string
 	if input.IsCompanyAdmin && input.CompanyName != "" {
-		// TODO: Créer une table companies dans ScyllaDB si nécessaire
-		// Pour l'instant, on génère juste un UUID
 		companyUUID := gocql.TimeUUID()
 		companyIDStr := companyUUID.String()
 		companyID = &companyIDStr
 
+		// Insérer dans la table companies
+		now := time.Now()
+		err = session.Query(`INSERT INTO companies (company_id, name, billing_street, billing_postal_code, billing_city, billing_country, created_at) 
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			companyUUID, input.CompanyName, input.BillingStreet, input.BillingPostalCode, input.BillingCity, input.BillingCountry, now).Exec()
+		if err != nil {
+			log.Printf("❌ Erreur création entreprise: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création entreprise"})
+			return
+		}
+		log.Printf("✅ Entreprise créée: %s (ID: %s)", input.CompanyName, companyIDStr)
+
+		// ✅ Créer aussi l'adresse de facturation de l'entreprise
+		if input.BillingStreet != "" && input.BillingCity != "" {
+			addressID := gocql.TimeUUID()
+			err = session.Query(`INSERT INTO addresses (address_id, user_id, company_id, street, postal_code, city, country, type, is_default) 
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				addressID, id, companyIDStr, input.BillingStreet, input.BillingPostalCode, input.BillingCity, input.BillingCountry, "billing", true).Exec()
+			if err != nil {
+				log.Printf("⚠️ Erreur création adresse facturation: %v", err)
+			} else {
+				log.Printf("✅ Adresse de facturation créée pour %s", input.CompanyName)
+			}
+		}
 	}
 
 	// ✅ Définit le rôle selon le type de compte
@@ -676,8 +755,14 @@ func CompleteProfile(c *gin.Context) {
 		return
 	}
 
-	// ✅ Invalider le cache utilisateur
+	// ✅ Invalider puis recharger le cache utilisateur (async)
 	cache.InvalidateUserCache(id)
+	go func() {
+		// Attendre un peu que la DB soit à jour
+		time.Sleep(10 * time.Millisecond)
+		// Recharger le cache
+		cache.GetUserFromCache(id)
+	}()
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":   "Profil complété avec succès",
