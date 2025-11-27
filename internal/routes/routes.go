@@ -25,11 +25,14 @@ func RegisterRoutes(router *gin.Engine) {
 
 	api := router.Group("/api")
 
+	// ✅ Rate limiting global sur toutes les routes API
+	api.Use(middleware.APIRateLimit())
+
 	auth := api.Group("/auth")
 	{
-		// 🔹 Auth locale
-		auth.POST("/register", user.CreateUser)
-		auth.POST("/login", user.Login)
+		// 🔹 Auth locale avec rate limiting
+		auth.POST("/register", middleware.RegisterRateLimit(), user.CreateUser)
+		auth.POST("/login", middleware.LoginRateLimit(), user.Login)
 		auth.GET("/me", middleware.AuthRequired(), user.Me)
 
 		auth.POST("/merge", middleware.AuthRequired(), user.MergeAccount)
@@ -37,7 +40,7 @@ func RegisterRoutes(router *gin.Engine) {
 		auth.POST("/change-password", middleware.AuthRequired(), user.ChangePassword)
 		auth.DELETE("/delete-account", middleware.AuthRequired(), user.DeleteAccount)
 
-		auth.POST("/forgot-password", user.ForgotPassword)
+		auth.POST("/forgot-password", middleware.ForgotPasswordRateLimit(), user.ForgotPassword)
 		auth.POST("/reset-password", user.ResetPassword)
 
 		auth.POST("/google/mobile", user.GoogleMobileLogin)
@@ -77,7 +80,7 @@ func RegisterRoutes(router *gin.Engine) {
 	products := api.Group("/products")
 	{
 		products.GET("", product.GetAllProducts)
-		products.GET("/search", product.SearchProducts)
+		products.GET("/search", middleware.SearchRateLimit(), product.SearchProducts)
 		products.GET("/category/:id", product.GetProductsByCategory)
 		products.GET("/best-sellers", product.GetBestSellers)
 		products.GET("/:id", product.GetProductFull)
@@ -99,7 +102,7 @@ func RegisterRoutes(router *gin.Engine) {
 	cart := api.Group("/cart", middleware.AuthRequired())
 	{
 		cart.GET("", user.GetCart)
-		cart.POST("/add", user.AddToCart)
+		cart.POST("/add", middleware.CartRateLimit(), user.AddToCart)
 		cart.PUT("/:productId", user.UpdateCartQuantity)
 		cart.DELETE("/:productId", user.RemoveFromCart)
 		cart.DELETE("", user.ClearCart)

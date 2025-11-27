@@ -1,6 +1,7 @@
 package user
 
 import (
+	"cedra_back_end/internal/cache"
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/models"
 	"encoding/json"
@@ -60,24 +61,34 @@ func GetMyOrders(c *gin.Context) {
 		log.Printf("⚠️ Erreur fermeture iter: %v", err)
 	}
 
-	// ✅ Enrichir avec les infos produits
-	productsSession, err := database.GetProductsSession()
-	if err == nil {
+	// ✅ Enrichir avec les infos produits (optimisé avec cache Redis)
+	if len(orders) > 0 {
+		// Collecter tous les product_ids uniques
+		productIDsMap := make(map[string]bool)
 		for i := range orders {
 			for j := range orders[i].Items {
-				productID, err := uuid.Parse(orders[i].Items[j].ProductID)
-				if err == nil {
-					var name string
-					err = productsSession.Query("SELECT name FROM products WHERE product_id = ?", gocql.UUID(productID)).Scan(&name)
-					if err == nil {
-						orders[i].Items[j].ProductName = name
-					}
+				productIDsMap[orders[i].Items[j].ProductID] = true
+			}
+		}
+
+		// Convertir en slice
+		productIDs := make([]string, 0, len(productIDsMap))
+		for productID := range productIDsMap {
+			productIDs = append(productIDs, productID)
+		}
+
+		// Récupérer tous les noms depuis le cache (Redis + ScyllaDB si nécessaire)
+		productNames := cache.GetProductNamesFromCache(productIDs)
+
+		// Appliquer les noms aux items
+		for i := range orders {
+			for j := range orders[i].Items {
+				if name, ok := productNames[orders[i].Items[j].ProductID]; ok {
+					orders[i].Items[j].ProductName = name
 				}
 			}
 		}
 	}
-
-	log.Printf("✅ %d commandes trouvées pour user %s", len(orders), userID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"orders": orders,
@@ -117,7 +128,6 @@ func GetOrderByID(c *gin.Context) {
 	err = session.Query("SELECT user_id, payment_intent_id, items, total_price, status, created_at, updated_at FROM orders_by_user WHERE user_id = ? AND order_id = ?", userID, gocql.UUID(orderUUID)).Scan(
 		&userIDDB, &paymentIntentID, &itemsJSON, &totalPrice, &status, &createdAt, &updatedAt)
 	if err != nil || userIDDB != userID {
-		log.Println("❌ Commande introuvable:", err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Commande introuvable"})
 		return
 	}

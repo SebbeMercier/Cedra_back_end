@@ -100,7 +100,7 @@ func loadScyllaConfigs() map[string]ScyllaKeyspaceConfig {
 	sslEnabled := strings.ToLower(os.Getenv("SCYLLA_SSL_ENABLED")) == "true"
 	caPath := os.Getenv("SCYLLA_SSL_CA_PATH")
 	timeout := 10 * time.Second
-	numConns := 5
+	numConns := 10 // ✅ Augmenté de 5 à 10 pour améliorer les performances sous charge
 	consistency := gocql.Quorum
 
 	// --- Keyspace Produits ---
@@ -158,6 +158,10 @@ func createScyllaCluster(config ScyllaKeyspaceConfig) (*gocql.ClusterConfig, err
 	cluster.Consistency = config.Consistency
 	cluster.Timeout = config.Timeout
 	cluster.NumConns = config.NumConns
+
+	// ✅ Optimisations de performance
+	cluster.MaxWaitSchemaAgreement = 30 * time.Second
+	cluster.ReconnectInterval = 1 * time.Second
 	cluster.Authenticator = gocql.PasswordAuthenticator{
 		Username: config.Username,
 		Password: config.Password,

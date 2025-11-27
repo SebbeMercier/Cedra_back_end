@@ -4,11 +4,12 @@ import (
 	"cedra_back_end/internal/config"
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/routes"
+	"context"
 	"errors"
 	"log"
-	"os"
 	"net/http"
-	
+	"os"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
@@ -29,6 +30,13 @@ func main() {
 	log.Println("✅ Stripe initialisé")
 
 	database.ConnectDatabases()
+
+	// ✅ Initialiser les prepared statements pour améliorer les performances
+	database.InitPreparedStatements()
+
+	// ✅ Pré-chauffer le cache Redis
+	warmupRedisCache()
+
 	initOAuthProviders()
 
 	r := gin.Default()
@@ -58,7 +66,7 @@ func initOAuthProviders() {
 		Secure:   false, // false en dev, true en prod
 		SameSite: http.SameSiteLaxMode,
 	}
-	
+
 	gothic.Store = store
 
 	// ✅ CRITIQUE : Fonction pour extraire le provider depuis l'URL
@@ -67,12 +75,12 @@ func initOAuthProviders() {
 		if provider := req.URL.Query().Get("provider"); provider != "" {
 			return provider, nil
 		}
-		
+
 		// Ensuite essaye le form
 		if provider := req.FormValue("provider"); provider != "" {
 			return provider, nil
 		}
-		
+
 		// ✅ FIX : Retourne une erreur générique
 		return "", errors.New("provider not found")
 	}
@@ -117,4 +125,13 @@ func initOAuthProviders() {
 
 	goth.UseProviders(providers...)
 	log.Printf("✅ %d OAuth provider(s) initialisé(s)", len(providers))
+}
+
+// warmupRedisCache pré-chauffe le cache Redis pour éviter la latence du premier appel
+func warmupRedisCache() {
+	ctx := context.Background()
+	// Faire un ping pour établir la connexion
+	if err := database.Redis.Ping(ctx).Err(); err == nil {
+		log.Println("✅ Cache Redis pré-chauffé")
+	}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
 	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // ================== CHANGE PASSWORD (avec ancien mot de passe) ==================
@@ -72,13 +71,14 @@ func ChangePassword(c *gin.Context) {
 	}
 
 	// Vérifie l'ancien mot de passe
-	if err := bcrypt.CompareHashAndPassword([]byte(password), []byte(input.OldPassword)); err != nil {
+	valid, err := utils.VerifyPassword(input.OldPassword, password)
+	if err != nil || !valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Ancien mot de passe incorrect"})
 		return
 	}
 
-	// Hash du nouveau mot de passe
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
+	// Hash du nouveau mot de passe avec Argon2id
+	hashedPassword, err := utils.HashPassword(input.NewPassword)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors du changement de mot de passe"})
 		return
@@ -87,14 +87,12 @@ func ChangePassword(c *gin.Context) {
 	// Met à jour le mot de passe
 	now := time.Now()
 	err = session.Query("UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?",
-		string(hashedPassword), now, userUUID).Exec()
+		hashedPassword, now, userUUID).Exec()
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la mise à jour"})
 		return
 	}
-
-	log.Printf("✅ Mot de passe changé pour l'utilisateur %s", id)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Mot de passe changé avec succès"})
 }
@@ -147,9 +145,8 @@ func ForgotPassword(c *gin.Context) {
 
 	// Génère un token de réinitialisation
 	resetToken := generateResetToken()
-	resetExpiry := time.Now().Add(1 * time.Hour) // Valide 1 heure
 
-	// Sauvegarde le token dans Redis
+	// Sauvegarde le token dans Redis (valide 1 heure)
 	ctx := context.Background()
 	err = database.RedisClient.Set(ctx, "reset_token:"+resetToken, userIDStr, 1*time.Hour).Err()
 	if err != nil {
@@ -160,8 +157,6 @@ func ForgotPassword(c *gin.Context) {
 
 	// Envoie l'email
 	go sendPasswordResetEmail(input.Email, name, resetToken)
-
-	log.Printf("✅ Email de réinitialisation envoyé à %s (token valide jusqu'à %s)", input.Email, resetExpiry.Format("15:04:05"))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Si cet email existe, un lien de réinitialisation a été envoyé"})
 }
@@ -193,8 +188,8 @@ func ResetPassword(c *gin.Context) {
 		return
 	}
 
-	// Hash du nouveau mot de passe
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
+	// Hash du nouveau mot de passe avec Argon2id
+	hashedPassword, err := utils.HashPassword(input.NewPassword)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la réinitialisation"})
 		return
@@ -218,7 +213,7 @@ func ResetPassword(c *gin.Context) {
 
 	now := time.Now()
 	err = session.Query("UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?",
-		string(hashedPassword), now, userUUID).Exec()
+		hashedPassword, now, userUUID).Exec()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur lors de la mise à jour"})
 		return
@@ -226,8 +221,6 @@ func ResetPassword(c *gin.Context) {
 
 	// Supprime le token (usage unique)
 	database.RedisClient.Del(ctx, "reset_token:"+input.Token)
-
-	log.Printf("✅ Mot de passe réinitialisé pour l'utilisateur %s", userID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Mot de passe réinitialisé avec succès"})
 }

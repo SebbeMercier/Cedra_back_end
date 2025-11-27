@@ -19,11 +19,9 @@ import (
 // 🟢 GET /api/addresses/mine
 func ListMyAddresses(c *gin.Context) {
 	userID := c.GetString("user_id")
-	companyID := c.GetString("company_id") // 🔹 si présent dans le JWT/middleware
-	log.Printf("🔍 DEBUG /addresses/mine → user_id=%v, company_id=%v", userID, companyID)
+	companyID := c.GetString("company_id")
 
 	if userID == "" {
-		log.Println("❌ Aucun user_id trouvé dans le contexte (JWT invalide ?)")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "non authentifié"})
 		return
 	}
@@ -42,9 +40,9 @@ func ListMyAddresses(c *gin.Context) {
 	// Adresses personnelles
 	iter := session.Query("SELECT address_id, user_id, company_id, street, postal_code, city, country, type, is_default FROM addresses WHERE user_id = ? AND type != ? ALLOW FILTERING", userID, "billing").Iter()
 	var (
-		addressID gocql.UUID
+		addressID                                                          gocql.UUID
 		userIDDB, companyIDDB, street, postalCode, city, country, typeAddr string
-		isDefault bool
+		isDefault                                                          bool
 	)
 	for iter.Scan(&addressID, &userIDDB, &companyIDDB, &street, &postalCode, &city, &country, &typeAddr, &isDefault) {
 		var companyIDPtr *string
@@ -100,7 +98,6 @@ func ListMyAddresses(c *gin.Context) {
 		iter2.Close()
 	}
 
-	log.Printf("✅ %d adresses trouvées pour user %s", len(results), userID)
 	c.JSON(http.StatusOK, results)
 }
 
