@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Gestion Produits</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 20px 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-size: 28px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            background: white;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            border: none;
+            background: #f3f4f6;
+            color: #6b7280;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .content {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #374151;
+            font-weight: 500;
+        }
+
+        input, textarea, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-danger {
+            background: #ef4444;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+
+        .btn-secondary {
+            background: #6b7280;
+            color: white;
+        }
+
+        .products-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .product-card {
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 15px;
+            transition: all 0.3s;
+        }
+
+        .product-card:hover {
+            border-color: #667eea;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+        }
+
+        .product-image {
+            width: 100%;
+            height: 200px;
+            object-fit: cover;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            background: #f3f4f6;
+        }
+
+        .product-info h3 {
+            color: #111827;
+            margin-bottom: 8px;
+            font-size: 18px;
+        }
+
+        .product-price {
+            color: #667eea;
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+
+        .product-stock {
+            color: #6b7280;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+
+        .product-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .product-actions button {
+            flex: 1;
+            padding: 8px;
+            font-size: 14px;
+        }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+
+        .alert-success {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #6ee7b7;
+        }
+
+        .alert-error {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fca5a5;
+        }
+
+        .tags-input {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 8px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            min-height: 45px;
+        }
+
+        .tag {
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 14px;
+        }
+
+        .tag-remove {
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-close {
+            font-size: 28px;
+            cursor: pointer;
+            color: #6b7280;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6b7280;
+        }
+
+        .logout-btn {
+            background: #ef4444;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .logout-btn:hover {
+            background: #dc2626;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛍️ Administration Produits</h1>
+            <button class="logout-btn" onclick="logout()">Déconnexion</button>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('products')">Produits</button>
+            <button class="tab" onclick="switchTab('categories')">Catégories</button>
+            <button class="tab" onclick="switchTab('create-product')">Créer Produit</button>
+        </div>
+
+        <div class="content">
+            <!-- Tab: Liste des produits -->
+            <div id="products-tab" class="tab-content active">
+                <h2>Liste des Produits</h2>
+                <div id="products-list" class="products-grid">
+                    <div class="loading">Chargement des produits...</div>
+                </div>
+            </div>
+
+            <!-- Tab: Catégories -->
+            <div id="categories-tab" class="tab-content">
+                <h2>Gestion des Catégories</h2>
+                <div class="form-group">
+                    <label>Nom de la catégorie</label>
+                    <input type="text" id="category-name" placeholder="Ex: Électronique">
+                </div>
+                <div class="form-group">
+                    <label>Slug</label>
+                    <input type="text" id="category-slug" placeholder="Ex: electronique">
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea id="category-description" placeholder="Description de la catégorie"></textarea>
+                </div>
+                <button class="btn btn-primary" onclick="createCategory()">Créer Catégorie</button>
+                
+                <div id="categories-list" style="margin-top: 30px;">
+                    <h3>Catégories existantes</h3>
+                    <div class="loading">Chargement des catégories...</div>
+                </div>
+            </div>
+
+            <!-- Tab: Créer un produit -->
+            <div id="create-product-tab" class="tab-content">
+                <h2>Créer un Nouveau Produit</h2>
+                <div id="product-alert"></div>
+                
+                <form id="product-form">
+                    <div class="form-group">
+                        <label>Nom du produit *</label>
+                        <input type="text" id="product-name" required placeholder="Ex: iPhone 15 Pro">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Description</label>
+                        <textarea id="product-description" placeholder="Description détaillée du produit"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Prix (€) *</label>
+                        <input type="number" id="product-price" step="0.01" required placeholder="99.99">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Stock *</label>
+                        <input type="number" id="product-stock" required placeholder="100">
+                    </div>
+
+                    <div class="form-group">
+                        <label>Catégorie *</label>
+                        <select id="product-category" required>
+                            <option value="">Sélectionner une catégorie</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Tags (appuyez sur Entrée pour ajouter)</label>
+                        <div class="tags-input" id="tags-container" onclick="document.getElementById('tag-input').focus()">
+                            <input type="text" id="tag-input" style="border: none; flex: 1; min-width: 120px;" 
+                                   placeholder="Ajouter un tag..." onkeypress="addTag(event)">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>URLs des images (une par ligne)</label>
+                        <textarea id="product-images" placeholder="/uploads/image1.jpg&#10;/uploads/image2.jpg"></textarea>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary">Créer le Produit</button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal pour éditer un produit -->
+    <div id="edit-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Modifier le Produit</h2>
+                <span class="modal-close" onclick="closeEditModal()">&times;</span>
+            </div>
+            <form id="edit-product-form">
+                <input type="hidden" id="edit-product-id">
+                
+                <div class="form-group">
+                    <label>Nom du produit</label>
+                    <input type="text" id="edit-product-name" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea id="edit-product-description"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Prix (€)</label>
+                    <input type="number" id="edit-product-price" step="0.01" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Stock</label>
+                    <input type="number" id="edit-product-stock" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Catégorie</label>
+                    <select id="edit-product-category" required>
+                        <option value="">Sélectionner une catégorie</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn btn-primary">Enregistrer</button>
+                <button type="button" class="btn btn-secondary" onclick="closeEditModal()">Annuler</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8080/api';
+        let authToken = localStorage.getItem('authToken');
+        let categories = [];
+        let products = [];
+        let productTags = [];
+
+        // Vérifier l'authentification au chargement
+        if (!authToken) {
+            alert('Vous devez être connecté pour accéder à cette page');
+            // Rediriger vers une page de login ou demander le token
+            authToken = prompt('Entrez votre token JWT:');
+            if (authToken) {
+                localStorage.setItem('authToken', authToken);
+            } else {
+                document.body.innerHTML = '<div style="text-align:center;padding:50px;"><h1>Accès refusé</h1><p>Token JWT requis</p></div>';
+            }
+        }
+
+        // Headers pour les requêtes
+        function getHeaders() {
+            return {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            };
+        }
+
+        // Gestion des onglets
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            
+            event.target.classList.add('active');
+            document.getElementById(tabName + '-tab').classList.add('active');
+
+            if (tabName === 'products') loadProducts();
+            if (tabName === 'categories') loadCategories();
+            if (tabName === 'create-product') loadCategoriesForSelect();
+        }
+
+        // Charger les produits
+        async function loadProducts() {
+            try {
+                const response = await fetch(`${API_URL}/products`);
+                products = await response.json();
+                
+                const container = document.getElementById('products-list');
+                if (products.length === 0) {
+                    container.innerHTML = '<p>Aucun produit trouvé</p>';
+                    return;
+                }
+
+                container.innerHTML = products.map(p => `
+                    <div class="product-card">
+                        <img src="${p.image_urls && p.image_urls[0] ? p.image_urls[0] : 'https://via.placeholder.com/280x200?text=No+Image'}" 
+                             class="product-image" alt="${p.name}">
+                        <div class="product-info">
+                            <h3>${p.name}</h3>
+                            <div class="product-price">${p.price.toFixed(2)} €</div>
+                            <div class="product-stock">Stock: ${p.stock}</div>
+                            <div class="product-actions">
+                                <button class="btn btn-primary" onclick="editProduct('${p.id}')">Modifier</button>
+                                <button class="btn btn-danger" onclick="deleteProduct('${p.id}')">Supprimer</button>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Erreur:', error);
+                showAlert('product', 'Erreur lors du chargement des produits', 'error');
+            }
+        }
+
+        // Charger les catégories
+        async function loadCategories() {
+            try {
+                const response = await fetch(`${API_URL}/categories`);
+                categories = await response.json();
+                
+                const container = document.getElementById('categories-list');
+                container.innerHTML = '<h3>Catégories existantes</h3>';
+                
+                if (categories.length === 0) {
+                    container.innerHTML += '<p>Aucune catégorie trouvée</p>';
+                    return;
+                }
+
+                const list = categories.map(c => `
+                    <div class="product-card">
+                        <h3>${c.name}</h3>
+                        <p>${c.description || 'Pas de description'}</p>
+                        <p><strong>Slug:</strong> ${c.slug}</p>
+                        <div class="product-actions">
+                            <button class="btn btn-danger" onclick="deleteCategory('${c.id}')">Supprimer</button>
+                        </div>
+                    </div>
+                `).join('');
+                
+                container.innerHTML += `<div class="products-grid">${list}</div>`;
+            } catch (error) {
+                console.error('Erreur:', error);
+            }
+        }
+
+        // Charger les catégories pour les selects
+        async function loadCategoriesForSelect() {
+            try {
+                const response = await fetch(`${API_URL}/categories`);
+                categories = await response.json();
+                
+                const selects = ['product-category', 'edit-product-category'];
+                selects.forEach(selectId => {
+                    const select = document.getElementById(selectId);
+                    select.innerHTML = '<option value="">Sélectionner une catégorie</option>' +
+                        categories.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+                });
+            } catch (error) {
+                console.error('Erreur:', error);
+            }
+        }
+
+        // Créer une catégorie
+        async function createCategory() {
+            const name = document.getElementById('category-name').value;
+            const slug = document.getElementById('category-slug').value;
+            const description = document.getElementById('category-description').value;
+
+            if (!name || !slug) {
+                alert('Le nom et le slug sont obligatoires');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/categories`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify({ name, slug, description })
+                });
+
+                if (response.ok) {
+                    alert('Catégorie créée avec succès');
+                    document.getElementById('category-name').value = '';
+                    document.getElementById('category-slug').value = '';
+                    document.getElementById('category-description').value = '';
+                    loadCategories();
+                } else {
+                    const error = await response.json();
+                    alert('Erreur: ' + (error.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                console.error('Erreur:', error);
+                alert('Erreur lors de la création de la catégorie');
+            }
+        }
+
+        // Gestion des tags
+        function addTag(event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                const input = event.target;
+                const value = input.value.trim();
+                
+                if (value && !productTags.includes(value)) {
+                    productTags.push(value);
+                    renderTags();
+                    input.value = '';
+                }
+            }
+        }
+
+        function removeTag(tag) {
+            productTags = productTags.filter(t => t !== tag);
+            renderTags();
+        }
+
+        function renderTags() {
+            const container = document.getElementById('tags-container');
+            const input = document.getElementById('tag-input');
+            
+            const tagsHTML = productTags.map(tag => `
+                <span class="tag">
+                    ${tag}
+                    <span class="tag-remove" onclick="removeTag('${tag}')">&times;</span>
+                </span>
+            `).join('');
+            
+            container.innerHTML = tagsHTML + input.outerHTML;
+        }
+
+        // Créer un produit
+        document.getElementById('product-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const name = document.getElementById('product-name').value;
+            const description = document.getElementById('product-description').value;
+            const price = parseFloat(document.getElementById('product-price').value);
+            const stock = parseInt(document.getElementById('product-stock').value);
+            const category_id = document.getElementById('product-category').value;
+            const imagesText = document.getElementById('product-images').value;
+            const image_urls = imagesText.split('\n').filter(url => url.trim());
+
+            if (!name || !price || !stock || !category_id) {
+                showAlert('product', 'Veuillez remplir tous les champs obligatoires', 'error');
+                return;
+            }
+
+            const productData = {
+                name,
+                description,
+                price,
+                stock,
+                category_id,
+                image_urls,
+                tags: productTags
+            };
+
+            try {
+                const response = await fetch(`${API_URL}/products`, {
+                    method: 'POST',
+                    headers: getHeaders(),
+                    body: JSON.stringify(productData)
+                });
+
+                if (response.ok) {
+                    showAlert('product', 'Produit créé avec succès!', 'success');
+                    document.getElementById('product-form').reset();
+                    productTags = [];
+                    renderTags();
+                    setTimeout(() => {
+                        switchTab('products');
+                    }, 1500);
+                } else {
+                    const error = await response.json();
+                    showAlert('product', 'Erreur: ' + (error.error || 'Erreur inconnue'), 'error');
+                }
+            } catch (error) {
+                console.error('Erreur:', error);
+                showAlert('product', 'Erreur lors de la création du produit', 'error');
+            }
+        });
+
+        // Éditer un produit
+        function editProduct(productId) {
+            const product = products.find(p => p.id === productId);
+            if (!product) return;
+
+            document.getElementById('edit-product-id').value = product.id;
+            document.getElementById('edit-product-name').value = product.name;
+            document.getElementById('edit-product-description').value = product.description || '';
+            document.getElementById('edit-product-price').value = product.price;
+            document.getElementById('edit-product-stock').value = product.stock;
+            document.getElementById('edit-product-category').value = product.category_id;
+
+            loadCategoriesForSelect();
+            document.getElementById('edit-modal').classList.add('active');
+        }
+
+        function closeEditModal() {
+            document.getElementById('edit-modal').classList.remove('active');
+        }
+
+        document.getElementById('edit-product-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const productId = document.getElementById('edit-product-id').value;
+            const productData = {
+                name: document.getElementById('edit-product-name').value,
+                description: document.getElementById('edit-product-description').value,
+                price: parseFloat(document.getElementById('edit-product-price').value),
+                stock: parseInt(document.getElementById('edit-product-stock').value),
+                category_id: document.getElementById('edit-product-category').value
+            };
+
+            try {
+                const response = await fetch(`${API_URL}/products/${productId}`, {
+                    method: 'PUT',
+                    headers: getHeaders(),
+                    body: JSON.stringify(productData)
+                });
+
+                if (response.ok) {
+                    alert('Produit modifié avec succès');
+                    closeEditModal();
+                    loadProducts();
+                } else {
+                    const error = await response.json();
+                    alert('Erreur: ' + (error.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                console.error('Erreur:', error);
+                alert('Erreur lors de la modification du produit');
+            }
+        });
+
+        // Supprimer un produit
+        async function deleteProduct(productId) {
+            if (!confirm('Êtes-vous sûr de vouloir supprimer ce produit ?')) return;
+
+            try {
+                const response = await fetch(`${API_URL}/products/${productId}`, {
+                    method: 'DELETE',
+                    headers: getHeaders()
+                });
+
+                if (response.ok) {
+                    alert('Produit supprimé avec succès');
+                    loadProducts();
+                } else {
+                    const error = await response.json();
+                    alert('Erreur: ' + (error.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                console.error('Erreur:', error);
+                alert('Erreur lors de la suppression du produit');
+            }
+        }
+
+        // Supprimer une catégorie
+        async function deleteCategory(categoryId) {
+            if (!confirm('Êtes-vous sûr de vouloir supprimer cette catégorie ?')) return;
+
+            try {
+                const response = await fetch(`${API_URL}/categories/${categoryId}`, {
+                    method: 'DELETE',
+                    headers: getHeaders()
+                });
+
+                if (response.ok) {
+                    alert('Catégorie supprimée avec succès');
+                    loadCategories();
+                } else {
+                    const error = await response.json();
+                    alert('Erreur: ' + (error.error || 'Erreur inconnue'));
+                }
+            } catch (error) {
+                console.error('Erreur:', error);
+                alert('Erreur lors de la suppression de la catégorie');
+            }
+        }
+
+        // Afficher une alerte
+        function showAlert(context, message, type) {
+            const alertDiv = document.getElementById(context + '-alert');
+            alertDiv.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+            setTimeout(() => {
+                alertDiv.innerHTML = '';
+            }, 5000);
+        }
+
+        // Déconnexion
+        function logout() {
+            localStorage.removeItem('authToken');
+            location.reload();
+        }
+
+        // Charger les produits au démarrage
+        loadProducts();
+    </script>
+</body>
+</html>

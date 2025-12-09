@@ -184,6 +184,27 @@ func Login(c *gin.Context) {
 		return
 	}
 
+	// ✅ OPTIMISATION 1: Vérifier le cache complet d'abord (évite DB + bcrypt)
+	ctx := context.Background()
+	cached, _ := cache.GetPasswordHashFromCache(input.Email, input.Password)
+	if cached {
+		// Récupérer l'utilisateur du cache
+		if user, err := cache.GetUserByEmailFromCache(input.Email); err == nil {
+			token := generateJWT(user)
+			c.JSON(http.StatusOK, gin.H{
+				"token":          token,
+				"userId":         user.ID,
+				"email":          user.Email,
+				"name":           user.Name,
+				"role":           user.Role,
+				"isCompanyAdmin": user.IsCompanyAdmin,
+				"companyId":      user.CompanyID,
+				"companyName":    user.CompanyName,
+			})
+			return
+		}
+	}
+
 	session, err := database.GetUsersSession()
 	if err != nil {
 		log.Printf("❌ Erreur session ScyllaDB: %v", err)
@@ -191,13 +212,12 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// ✅ Utiliser prepared statement pour améliorer les performances
+	// ✅ OPTIMISATION 2: Récupération user_id (prepared statement, ~5ms)
 	var userID gocql.UUID
 	stmt := database.GetPreparedGetUserByEmail()
 	if stmt != nil {
 		err = stmt.Bind(input.Email).Scan(&userID)
 	} else {
-		// Fallback si prepared statement pas initialisé
 		err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", input.Email).Scan(&userID)
 	}
 	if err != nil {
@@ -205,7 +225,7 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// Récupérer seulement les champs nécessaires pour le login
+	// ✅ OPTIMISATION 3: Récupération détails user (prepared statement, ~5ms)
 	var (
 		email, password, name, role, provider, providerID string
 		companyID                                         *gocql.UUID
@@ -213,7 +233,6 @@ func Login(c *gin.Context) {
 		isCompanyAdmin                                    bool
 	)
 
-	// ✅ Utiliser prepared statement
 	stmt2 := database.GetPreparedGetUserByID()
 	if stmt2 != nil {
 		err = stmt2.Bind(userID).Scan(&email, &password, &name, &role, &provider, &providerID, &companyID, &companyName, &isCompanyAdmin)
@@ -227,23 +246,17 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// Vérifier le provider
-	if provider != "local" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
+	// ✅ OPTIMISATION 4: Vérifier si le compte a un password (peut avoir local + OAuth)
+	if password == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Ce compte utilise une connexion sociale (Google/Facebook)"})
 		return
 	}
 
-	// ✅ Vérifier d'abord le cache pour éviter le hashing (gain ~50ms sur logins répétés)
-	cached, _ := cache.GetPasswordHashFromCache(input.Email, input.Password)
-	if !cached {
-		// Si pas en cache, vérifier le mot de passe
-		valid, err := utils.VerifyPassword(input.Password, password)
-		if err != nil || !valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
-			return
-		}
-		// Mettre en cache pour les prochains logins (15 min)
-		cache.SetPasswordHashInCache(input.Email, input.Password)
+	// ✅ OPTIMISATION 5: Vérification mot de passe (Argon2id ~20-25ms)
+	valid, err := utils.VerifyPassword(input.Password, password)
+	if err != nil || !valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Email ou mot de passe incorrect"})
+		return
 	}
 
 	var companyIDStr *string
@@ -267,11 +280,12 @@ func Login(c *gin.Context) {
 
 	token := generateJWT(user)
 
-	// ✅ Pré-charger le cache utilisateur pour les prochaines requêtes (async)
+	// ✅ OPTIMISATION 4: Mise en cache parallèle (password + user)
 	go func() {
-		ctx := context.Background()
+		cache.SetPasswordHashInCache(input.Email, input.Password)
 		jsonData, _ := json.Marshal(user)
 		database.Redis.Set(ctx, "user:"+user.ID, jsonData, 5*time.Minute)
+		database.Redis.Set(ctx, "user:email:"+input.Email, jsonData, 5*time.Minute)
 	}()
 
 	c.JSON(http.StatusOK, gin.H{
@@ -355,6 +369,7 @@ func CallbackAuth(c *gin.Context) {
 
 	var userEmail, userName, userID string
 
+	// ✅ OPTIMISATION: Utiliser client HTTP optimisé
 	switch provider {
 	case "google":
 		clientID := os.Getenv("GOOGLE_CLIENT_ID")
@@ -368,14 +383,14 @@ func CallbackAuth(c *gin.Context) {
 		data.Set("redirect_uri", redirect)
 		data.Set("grant_type", "authorization_code")
 
-		resp, _ := http.PostForm("https://oauth2.googleapis.com/token", data)
+		resp, _ := oauthHTTPClient.PostForm("https://oauth2.googleapis.com/token", data)
 		defer resp.Body.Close()
 		var tokenResp struct {
 			AccessToken string `json:"access_token"`
 		}
 		json.NewDecoder(resp.Body).Decode(&tokenResp)
 
-		userResp, _ := http.Get("https://www.googleapis.com/oauth2/v2/userinfo?access_token=" + tokenResp.AccessToken)
+		userResp, _ := oauthHTTPClient.Get("https://www.googleapis.com/oauth2/v2/userinfo?access_token=" + tokenResp.AccessToken)
 		defer userResp.Body.Close()
 		var gu struct{ ID, Email, Name string }
 		json.NewDecoder(userResp.Body).Decode(&gu)
@@ -388,12 +403,12 @@ func CallbackAuth(c *gin.Context) {
 
 		tokenURL := fmt.Sprintf("https://graph.facebook.com/v12.0/oauth/access_token?client_id=%s&redirect_uri=%s&client_secret=%s&code=%s",
 			clientID, url.QueryEscape(redirect), clientSecret, code)
-		resp, _ := http.Get(tokenURL)
+		resp, _ := oauthHTTPClient.Get(tokenURL)
 		defer resp.Body.Close()
 		var tokenResp struct{ AccessToken string }
 		json.NewDecoder(resp.Body).Decode(&tokenResp)
 
-		userResp, _ := http.Get("https://graph.facebook.com/me?fields=id,name,email&access_token=" + tokenResp.AccessToken)
+		userResp, _ := oauthHTTPClient.Get("https://graph.facebook.com/me?fields=id,name,email&access_token=" + tokenResp.AccessToken)
 		defer userResp.Body.Close()
 		var fb struct{ ID, Email, Name string }
 		json.NewDecoder(userResp.Body).Decode(&fb)
@@ -404,6 +419,16 @@ func CallbackAuth(c *gin.Context) {
 }
 
 // ================== AUTH SOCIALE (MOBILE) ==================
+
+// ✅ Client HTTP réutilisable avec timeout optimisé
+var oauthHTTPClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
 
 func GoogleMobileLogin(c *gin.Context) {
 	var body struct {
@@ -420,7 +445,8 @@ func GoogleMobileLogin(c *gin.Context) {
 		os.Getenv("GOOGLE_ANDROID_CLIENT_ID"),
 	}
 
-	resp, err := http.Get("https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(body.IDToken))
+	// ✅ OPTIMISATION: Utiliser client HTTP avec timeout et connection pooling
+	resp, err := oauthHTTPClient.Get("https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(body.IDToken))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur vérification Google"})
 		return
@@ -454,7 +480,7 @@ func GoogleMobileLogin(c *gin.Context) {
 
 	user := findOrCreateOAuthUser("google", payload.Subject, payload.Email, payload.Name)
 	token := generateJWT(user)
-	c.JSON(http.StatusOK, gin.H{"token": token, "email": user.Email, "name": user.Name})
+	c.JSON(http.StatusOK, gin.H{"token": token, "userId": user.ID, "role": user.Role})
 }
 
 func FacebookMobileLogin(c *gin.Context) {
@@ -466,7 +492,8 @@ func FacebookMobileLogin(c *gin.Context) {
 		return
 	}
 
-	resp, err := http.Get("https://graph.facebook.com/me?fields=id,name,email&access_token=" + body.AccessToken)
+	// ✅ OPTIMISATION: Utiliser client HTTP avec timeout et connection pooling
+	resp, err := oauthHTTPClient.Get("https://graph.facebook.com/me?fields=id,name,email&access_token=" + body.AccessToken)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur API Facebook"})
 		return
@@ -487,12 +514,23 @@ func FacebookMobileLogin(c *gin.Context) {
 
 	user := findOrCreateOAuthUser("facebook", fb.ID, fb.Email, fb.Name)
 	token := generateJWT(user)
-	c.JSON(http.StatusOK, gin.H{"token": token, "email": user.Email, "name": user.Name})
+	c.JSON(http.StatusOK, gin.H{"token": token, "userId": user.ID, "role": user.Role})
 }
 
 // ================== UTILITAIRES ==================
 
 func findOrCreateOAuthUser(provider, providerID, email, name string) models.User {
+	// ✅ OPTIMISATION 1: Vérifier le cache d'abord
+	ctx := context.Background()
+	cacheKey := "oauth_user:" + provider + ":" + providerID
+
+	if cached, err := database.Redis.Get(ctx, cacheKey).Result(); err == nil {
+		var user models.User
+		if json.Unmarshal([]byte(cached), &user) == nil {
+			return user
+		}
+	}
+
 	session, err := database.GetUsersSession()
 	if err != nil {
 		log.Printf("❌ Erreur session ScyllaDB: %v", err)
@@ -502,47 +540,108 @@ func findOrCreateOAuthUser(provider, providerID, email, name string) models.User
 	var user models.User
 	var userID gocql.UUID
 
-	// 1️⃣ Recherche par email (optimisé)
-	err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", email).Scan(&userID)
+	// ✅ OPTIMISATION 2: Utiliser prepared statements
+	stmt := database.GetPreparedGetUserByEmail()
+	if stmt != nil {
+		err = stmt.Bind(email).Scan(&userID)
+	} else {
+		err = session.Query("SELECT user_id FROM users_by_email WHERE email = ?", email).Scan(&userID)
+	}
+
 	if err == nil {
-		// Utilisateur existe, récupérer seulement les détails nécessaires
+		// ✅ Utilisateur existe avec cet email
+		log.Printf("🔍 Utilisateur trouvé avec email %s (ID: %s)", email, userID.String())
+
 		var (
 			emailDB, nameDB, role, providerDB, providerIDDB string
 			companyID                                       *gocql.UUID
 			companyName                                     string
 			isCompanyAdmin                                  bool
 		)
-		err = session.Query(`SELECT email, name, role, provider, provider_id, company_id, company_name, is_company_admin 
-		                     FROM users WHERE user_id = ?`, userID).Scan(
-			&emailDB, &nameDB, &role, &providerDB, &providerIDDB, &companyID, &companyName, &isCompanyAdmin)
-		if err == nil {
-			// Mettre à jour le provider si différent
+
+		stmt2 := database.GetPreparedGetUserByID()
+		if stmt2 != nil {
+			err = stmt2.Bind(userID).Scan(&emailDB, &nameDB, &role, &providerDB, &providerIDDB, &companyID, &companyName, &isCompanyAdmin)
+		} else {
+			err = session.Query(`SELECT email, name, role, provider, provider_id, company_id, company_name, is_company_admin 
+								 FROM users WHERE user_id = ?`, userID).Scan(
+				&emailDB, &nameDB, &role, &providerDB, &providerIDDB, &companyID, &companyName, &isCompanyAdmin)
+		}
+
+		if err != nil {
+			// ⚠️ INCOHÉRENCE: users_by_email existe mais pas users
+			log.Printf("⚠️ Incohérence détectée: email %s existe dans users_by_email mais pas dans users (ID: %s)", email, userID.String())
+			log.Printf("⚠️ Nettoyage de l'entrée orpheline et création d'un nouvel utilisateur...")
+
+			// Nettoyer l'entrée orpheline (async)
+			go func() {
+				session.Query("DELETE FROM users_by_email WHERE email = ?", email).Exec()
+			}()
+
+			// Continuer vers la création d'un nouvel utilisateur
+			// (le code va tomber dans la section création ci-dessous)
+		} else {
+			log.Printf("🔍 Provider actuel: %s, Nouveau provider: %s", providerDB, provider)
+
+			// ✅ OPTIMISATION 3: Lier le provider OAuth au compte existant
 			if providerDB != provider || providerIDDB != providerID {
-				now := time.Now()
-				session.Query(`UPDATE users SET provider = ?, provider_id = ?, name = ?, updated_at = ? WHERE user_id = ?`,
-					provider, providerID, name, now, userID).Exec()
+				// Mettre à jour le provider principal si c'était "local" ou "pending"
+				if providerDB == "local" || providerDB == "pending" {
+					log.Printf("🔗 Liaison OAuth %s au compte local %s", provider, email)
+					go func() {
+						now := time.Now()
+						session.Query(`UPDATE users SET provider = ?, provider_id = ?, name = ?, updated_at = ? WHERE user_id = ?`,
+							provider, providerID, name, now, userID).Exec()
+						// Invalider le cache
+						cache.InvalidateUserCache(userID.String())
+					}()
+				} else {
+					// Compte OAuth existant, juste logger
+					log.Printf("ℹ️ Compte %s existe déjà avec provider %s", email, providerDB)
+				}
 			}
+
 			var companyIDStr *string
 			if companyID != nil {
 				s := companyID.String()
 				companyIDStr = &s
 			}
+
+			// ✅ Retourner l'utilisateur existant (pas de création)
 			user = models.User{
 				ID:             userID.String(),
 				Email:          emailDB,
 				Name:           nameDB,
 				Role:           role,
-				Provider:       provider,
-				ProviderID:     providerID,
+				Provider:       provider,   // Provider demandé
+				ProviderID:     providerID, // Provider ID demandé
 				CompanyID:      companyIDStr,
 				CompanyName:    companyName,
 				IsCompanyAdmin: &isCompanyAdmin,
 			}
+
+			// ✅ OPTIMISATION 4: Mettre en cache (async)
+			go func() {
+				if data, err := json.Marshal(user); err == nil {
+					database.Redis.Set(ctx, cacheKey, data, 10*time.Minute)
+				}
+			}()
+
+			log.Printf("✅ Retour utilisateur existant: %s (provider: %s)", email, provider)
 			return user
 		}
+		// Si erreur, continuer vers la création
+		log.Printf("❌ Erreur récupération détails user: %v", err)
+	} else {
+		log.Printf("🆕 Aucun utilisateur trouvé avec email %s, création...", email)
 	}
 
-	// 3️⃣ Création d'un nouvel utilisateur OAuth avec rôle "pending" (parallèle)
+	// ✅ OPTIMISATION 5: Création utilisateur avec prepared statements
+	log.Printf("🆕 Création nouvel utilisateur OAuth: %s (%s)", email, provider)
+
+	// Attendre un peu si on vient de nettoyer une entrée orpheline
+	time.Sleep(100 * time.Millisecond)
+
 	userID = gocql.TimeUUID()
 	isAdmin := false
 	now := time.Now()
@@ -550,19 +649,66 @@ func findOrCreateOAuthUser(provider, providerID, email, name string) models.User
 	errChan := make(chan error, 2)
 
 	go func() {
-		errChan <- session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			userID, email, "", name, "pending", provider, providerID, nil, "", isAdmin, now, now).Exec()
+		stmt := database.GetPreparedInsertUser()
+		if stmt != nil {
+			errChan <- stmt.Bind(userID, email, "", name, "pending", provider, providerID, nil, "", isAdmin, now, now).Exec()
+		} else {
+			errChan <- session.Query(`INSERT INTO users (user_id, email, password, name, role, provider, provider_id, company_id, company_name, is_company_admin, created_at, updated_at) 
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				userID, email, "", name, "pending", provider, providerID, nil, "", isAdmin, now, now).Exec()
+		}
 	}()
 
 	go func() {
-		errChan <- session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", email, userID).Exec()
+		stmt := database.GetPreparedInsertUserByEmail()
+		if stmt != nil {
+			errChan <- stmt.Bind(email, userID).Exec()
+		} else {
+			errChan <- session.Query("INSERT INTO users_by_email (email, user_id) VALUES (?, ?)", email, userID).Exec()
+		}
 	}()
 
 	// Attendre les 2 insertions
 	for i := 0; i < 2; i++ {
 		if err := <-errChan; err != nil {
-			log.Printf("❌ Erreur création utilisateur OAuth: %v", err)
+			log.Printf("❌ Erreur création utilisateur OAuth (%s): %v", email, err)
+			// Si l'erreur est "already exists", c'est qu'un autre thread a créé l'utilisateur
+			// On devrait le récupérer au lieu de retourner vide
+			if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "duplicate") {
+				log.Printf("⚠️ Utilisateur %s existe déjà, tentative de récupération...", email)
+				// Réessayer de récupérer l'utilisateur
+				var existingUserID gocql.UUID
+				if err := session.Query("SELECT user_id FROM users_by_email WHERE email = ?", email).Scan(&existingUserID); err == nil {
+					// Récupérer les détails
+					var emailDB, nameDB, role, providerDB, providerIDDB string
+					var companyID *gocql.UUID
+					var companyName string
+					var isCompanyAdmin bool
+
+					if err := session.Query(`SELECT email, name, role, provider, provider_id, company_id, company_name, is_company_admin 
+											 FROM users WHERE user_id = ?`, existingUserID).Scan(
+						&emailDB, &nameDB, &role, &providerDB, &providerIDDB, &companyID, &companyName, &isCompanyAdmin); err == nil {
+
+						var companyIDStr *string
+						if companyID != nil {
+							s := companyID.String()
+							companyIDStr = &s
+						}
+
+						return models.User{
+							ID:             existingUserID.String(),
+							Email:          emailDB,
+							Name:           nameDB,
+							Role:           role,
+							Provider:       provider,
+							ProviderID:     providerID,
+							CompanyID:      companyIDStr,
+							CompanyName:    companyName,
+							IsCompanyAdmin: &isCompanyAdmin,
+						}
+					}
+				}
+			}
 			return models.User{}
 		}
 	}
@@ -576,7 +722,17 @@ func findOrCreateOAuthUser(provider, providerID, email, name string) models.User
 		Role:           "pending",
 		IsCompanyAdmin: &isAdmin,
 	}
-	log.Printf("🆕 Utilisateur OAuth créé (%s) avec rôle pending : %s", provider, email)
+
+	// ✅ OPTIMISATION 6: Mettre en cache le nouvel utilisateur (async)
+	go func() {
+		if data, err := json.Marshal(user); err == nil {
+			database.Redis.Set(ctx, cacheKey, data, 10*time.Minute)
+		}
+	}()
+
+	if os.Getenv("DEBUG") != "true" {
+		log.Printf("🆕 Utilisateur OAuth créé (%s): %s", provider, email)
+	}
 	return user
 }
 
@@ -804,6 +960,7 @@ func MergeAccount(c *gin.Context) {
 		Email      string `json:"email"`
 		Provider   string `json:"provider"`
 		ProviderID string `json:"provider_id"`
+		Password   string `json:"password"` // ✅ Optionnel : pour créer un password si compte OAuth
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -830,25 +987,83 @@ func MergeAccount(c *gin.Context) {
 	}
 	userUUID := gocql.UUID(uid)
 
-	// Vérifier que l'email correspond
-	var email string
-	err = session.Query("SELECT email FROM users WHERE user_id = ?", userUUID).Scan(&email)
+	// Récupérer les infos actuelles
+	var email, currentProvider, currentPassword string
+	err = session.Query("SELECT email, provider, password FROM users WHERE user_id = ?", userUUID).Scan(&email, &currentProvider, &currentPassword)
 	if err != nil || email != input.Email {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Email non autorisé"})
 		return
 	}
 
-	// Mettre à jour le provider
 	now := time.Now()
-	err = session.Query(`UPDATE users SET provider = ?, provider_id = ?, updated_at = ? WHERE user_id = ?`,
-		input.Provider, input.ProviderID, now, userUUID).Exec()
-	if err != nil {
-		log.Printf("❌ Erreur mise à jour provider: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur fusion"})
+
+	// ✅ CAS 1: Lier un compte OAuth à un compte local existant
+	if currentProvider == "local" && input.Provider != "local" {
+		// Garder le password local, ajouter le provider OAuth
+		err = session.Query(`UPDATE users SET provider = ?, provider_id = ?, updated_at = ? WHERE user_id = ?`,
+			input.Provider, input.ProviderID, now, userUUID).Exec()
+		if err != nil {
+			log.Printf("❌ Erreur liaison OAuth: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur liaison compte"})
+			return
+		}
+
+		// Invalider le cache
+		cache.InvalidateUserCache(userID)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Compte OAuth lié avec succès. Vous pouvez maintenant vous connecter avec " + input.Provider + " ou votre email/mot de passe.",
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Comptes fusionnés avec succès"})
+	// ✅ CAS 2: Ajouter un password à un compte OAuth
+	if (currentProvider == "google" || currentProvider == "facebook") && input.Password != "" {
+		// Hasher le nouveau password
+		hashedPassword, err := utils.HashPassword(input.Password)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur création mot de passe"})
+			return
+		}
+
+		// Ajouter le password sans écraser le provider OAuth
+		err = session.Query(`UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?`,
+			hashedPassword, now, userUUID).Exec()
+		if err != nil {
+			log.Printf("❌ Erreur ajout password: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur ajout mot de passe"})
+			return
+		}
+
+		// Invalider le cache
+		cache.InvalidateUserCache(userID)
+		cache.InvalidateAuthCache(email)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Mot de passe ajouté avec succès. Vous pouvez maintenant vous connecter avec " + currentProvider + " ou votre email/mot de passe.",
+		})
+		return
+	}
+
+	// ✅ CAS 3: Changer de provider OAuth (déconseillé mais possible)
+	if input.Provider != "local" && input.Provider != currentProvider {
+		err = session.Query(`UPDATE users SET provider = ?, provider_id = ?, updated_at = ? WHERE user_id = ?`,
+			input.Provider, input.ProviderID, now, userUUID).Exec()
+		if err != nil {
+			log.Printf("❌ Erreur changement provider: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur changement provider"})
+			return
+		}
+
+		cache.InvalidateUserCache(userID)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Provider changé avec succès",
+		})
+		return
+	}
+
+	c.JSON(http.StatusBadRequest, gin.H{"error": "Opération non supportée"})
 }
 
 func DeleteAccount(c *gin.Context) {

@@ -99,8 +99,8 @@ func loadScyllaConfigs() map[string]ScyllaKeyspaceConfig {
 	hosts := strings.Split(os.Getenv("SCYLLA_HOSTS"), ",")
 	sslEnabled := strings.ToLower(os.Getenv("SCYLLA_SSL_ENABLED")) == "true"
 	caPath := os.Getenv("SCYLLA_SSL_CA_PATH")
-	timeout := 10 * time.Second
-	numConns := 10 // ✅ Augmenté de 5 à 10 pour améliorer les performances sous charge
+	timeout := 5 * time.Second // ✅ Réduit de 10s à 5s pour timeout plus rapide
+	numConns := 20             // ✅ Augmenté de 10 à 20 pour plus de connexions parallèles
 	consistency := gocql.Quorum
 
 	// --- Keyspace Produits ---

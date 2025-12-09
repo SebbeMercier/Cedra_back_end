@@ -15,12 +15,12 @@ import (
 
 func RegisterRoutes(router *gin.Engine) {
 	router.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:5173"}, // ✅ Spécifier les origines exactes
+		AllowAllOrigins:  true, // ✅ Permet toutes les origines (dev uniquement)
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: true,
-		MaxAge:           12 * time.Hour,
+		ExposeHeaders:    []string{"Content-Length", "Content-Encoding"},
+		AllowCredentials: false,          // ⚠️ Doit être false avec AllowAllOrigins
+		MaxAge:           24 * time.Hour, // ✅ Augmenté à 24h pour réduire les preflight
 	}))
 
 	api := router.Group("/api")
@@ -101,11 +101,12 @@ func RegisterRoutes(router *gin.Engine) {
 
 	cart := api.Group("/cart", middleware.AuthRequired())
 	{
-		cart.GET("", user.GetCart)
-		cart.POST("/add", middleware.CartRateLimit(), user.AddToCart)
-		cart.PUT("/:productId", user.UpdateCartQuantity)
-		cart.DELETE("/:productId", user.RemoveFromCart)
-		cart.DELETE("", user.ClearCart)
+		cart.GET("", user.GetCartOptimized)                                    // ✅ Optimisé
+		cart.GET("/sync", user.SyncCart)                                       // ✅ Nouveau - Synchronisation
+		cart.POST("/add", middleware.CartRateLimit(), user.AddToCartOptimized) // ✅ Optimisé
+		cart.PUT("/:productId", user.UpdateCartQuantityOptimized)              // ✅ Optimisé
+		cart.DELETE("/:productId", user.RemoveFromCartOptimized)               // ✅ Optimisé
+		cart.DELETE("", user.ClearCartOptimized)                               // ✅ Optimisé
 	}
 
 	images := api.Group("/images")

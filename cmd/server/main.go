@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/sessions"
@@ -40,14 +41,31 @@ func main() {
 	initOAuthProviders()
 
 	r := gin.Default()
+
 	routes.RegisterRoutes(r)
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
+
+	// ✅ OPTIMISATION RÉSEAU : Serveur HTTP optimisé
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
+	}
+
 	log.Println("🚀 Serveur Cedra lancé sur le port", port)
-	r.Run(":" + port)
+	log.Println("✅ Keep-Alive optimisé (120s)")
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("❌ Erreur serveur: %v", err)
+	}
 }
 
 func initOAuthProviders() {

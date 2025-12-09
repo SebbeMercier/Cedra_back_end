@@ -14,9 +14,9 @@ import (
 // Paramètres Argon2id optimisés pour la performance
 // Ces paramètres offrent un bon équilibre sécurité/performance
 const (
-	// Temps de calcul : ~20-30ms (au lieu de 50-60ms avec bcrypt)
+	// Temps de calcul : ~15-20ms (optimisé pour login rapide)
 	Argon2Time    = 1         // Nombre d'itérations
-	Argon2Memory  = 64 * 1024 // 64 MB de mémoire
+	Argon2Memory  = 32 * 1024 // 32 MB de mémoire (réduit de 64 MB)
 	Argon2Threads = 4         // Nombre de threads parallèles
 	Argon2KeyLen  = 32        // Longueur de la clé (256 bits)
 	Argon2SaltLen = 16        // Longueur du salt

@@ -2,9 +2,11 @@ package cache
 
 import (
 	"cedra_back_end/internal/database"
+	"cedra_back_end/internal/models"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"time"
 )
 
@@ -52,4 +54,19 @@ func InvalidateAuthCache(email string) {
 	for iter.Next(ctx) {
 		database.Redis.Del(ctx, iter.Val())
 	}
+}
+
+// GetUserByEmailFromCache récupère un utilisateur depuis le cache par email
+func GetUserByEmailFromCache(email string) (models.User, error) {
+	ctx := context.Background()
+	cacheKey := "user:email:" + email
+
+	result, err := database.Redis.Get(ctx, cacheKey).Result()
+	if err != nil {
+		return models.User{}, err
+	}
+
+	var user models.User
+	err = json.Unmarshal([]byte(result), &user)
+	return user, err
 }
