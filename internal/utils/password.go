@@ -95,7 +95,7 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 }
 
 // verifyBcrypt vérifie un hash bcrypt (rétrocompatibilité)
-func verifyBcrypt(password, hash string) (bool, error) {
+func verifyBcrypt(_, hash string) (bool, error) {
 	// Import bcrypt seulement si nécessaire
 	// Pour l'instant, retourner false pour forcer la migration
 	return false, errors.New("bcrypt non supporté, veuillez réinitialiser votre mot de passe")

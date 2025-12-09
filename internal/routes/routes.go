@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"cedra_back_end/internal/handlers/company"
-	"cedra_back_end/internal/handlers/payement"
+	pa "cedra_back_end/internal/handlers/payement"
 	"cedra_back_end/internal/handlers/product"
 	"cedra_back_end/internal/handlers/user"
 	"cedra_back_end/internal/middleware"
@@ -118,14 +118,73 @@ func RegisterRoutes(router *gin.Engine) {
 
 	payments := api.Group("/payments")
 	{
-		payments.POST("/create-intent", middleware.AuthRequired(), payement.CreatePaymentIntent)
-		payments.POST("/webhook", payement.StripeWebhook) // ⚠️ Pas d'auth (Stripe vérifie la signature)
+		payments.POST("/create-intent", middleware.AuthRequired(), pa.CreatePaymentIntent)
+		payments.POST("/checkout", middleware.AuthRequired(), pa.Checkout)             // ✅ Nouveau endpoint checkout
+		payments.GET("/validate-coupon", middleware.AuthRequired(), pa.ValidateCoupon) // ✅ Validation coupon
+		payments.POST("/webhook", pa.StripeWebhook)                                    // ⚠️ Pas d'auth (Stripe vérifie la signature)
+	}
+
+	// ✅ Routes admin pour la gestion des commandes
+	adminOrders := api.Group("/admin/orders", middleware.AuthRequired(), middleware.RequireAdmin)
+	{
+		adminOrders.GET("", pa.GetAllOrders)
+		adminOrders.GET("/stats", pa.GetOrderStats)
+		adminOrders.PUT("/:id/status", pa.UpdateOrderStatus)
+	}
+
+	// ✅ Wishlist
+	wishlist := api.Group("/wishlist", middleware.AuthRequired())
+	{
+		wishlist.GET("", user.GetWishlist)
+		wishlist.POST("/add", user.AddToWishlist)
+		wishlist.DELETE("/:productId", user.RemoveFromWishlist)
+	}
+
+	// ✅ Reviews & Ratings
+	reviews := api.Group("/reviews")
+	{
+		reviews.GET("/product/:id", product.GetProductReviews)
+		reviews.POST("/product/:id", middleware.AuthRequired(), product.CreateReview)
+	}
+
+	// ✅ Refunds
+	refunds := api.Group("/refunds", middleware.AuthRequired())
+	{
+		refunds.GET("/mine", pa.GetUserRefunds)
+		refunds.POST("/order/:orderId", pa.RequestRefund)
+	}
+
+	adminRefunds := api.Group("/admin/refunds", middleware.AuthRequired(), middleware.RequireAdmin)
+	{
+		adminRefunds.GET("", pa.GetAllRefunds)
+		adminRefunds.PUT("/:refundId/process", pa.ProcessRefund)
+	}
+
+	// ✅ Shipping
+	shipping := api.Group("/shipping")
+	{
+		shipping.GET("/options", pa.GetShippingOptions)
+	}
+
+	// ✅ Advanced Search
+	search := api.Group("/search")
+	{
+		search.GET("/advanced", product.SearchProductsAdvanced)
+		search.GET("/filters", product.GetProductFilters)
+	}
+
+	// ✅ Dashboard Admin
+	dashboard := api.Group("/admin/dashboard", middleware.AuthRequired(), middleware.RequireAdmin)
+	{
+		dashboard.GET("/stats", pa.GetDashboardStats)
+		dashboard.GET("/recent-orders", pa.GetRecentOrders)
+		dashboard.GET("/top-products", pa.GetTopProducts)
 	}
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status":  "ok",
-			"version": "1.0.0",
+			"version": "1.1.0",
 		})
 	})
 }

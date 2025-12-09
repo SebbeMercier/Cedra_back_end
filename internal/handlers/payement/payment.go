@@ -1,4 +1,4 @@
-package payement
+package pa
 
 import (
 	"cedra_back_end/internal/database"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
+	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v83"
 	"github.com/stripe/stripe-go/v83/paymentintent"
 	"github.com/stripe/stripe-go/v83/webhook"
@@ -202,6 +203,13 @@ func handleStripeEvent(event stripe.Event) {
 
 	log.Printf("✅ Commande insérée avec ID = %s", orderID.String())
 
+	// ✅ Décrémenter le stock pour chaque produit
+	if err := decrementStock(orderItems); err != nil {
+		log.Printf("⚠️ Erreur décrémentation stock: %v", err)
+	} else {
+		log.Println("✅ Stock décrémenté avec succès")
+	}
+
 	// Créer l'objet order pour les fonctions utils
 	order := models.Order{
 		ID:              orderID,
@@ -239,10 +247,34 @@ func handleStripeEvent(event stripe.Event) {
 	}()
 }
 
-func calcTotal(items []models.CartItem) float64 {
-	var total float64
-	for _, item := range items {
-		total += item.Price * float64(item.Quantity)
+// decrementStock décrémente le stock des produits après un paiement réussi
+func decrementStock(orderItems []models.OrderItem) error {
+	productsSession, err := database.GetProductsSession()
+	if err != nil {
+		return err
 	}
-	return total
+
+	for _, item := range orderItems {
+		productUUID, parseErr := uuid.Parse(item.ProductID)
+		if parseErr != nil {
+			log.Printf("⚠️ ID produit invalide: %s", item.ProductID)
+			continue
+		}
+
+		// Décrémenter le stock
+		execErr := productsSession.Query(
+			"UPDATE products SET stock = stock - ? WHERE product_id = ?",
+			item.Quantity,
+			gocql.UUID(productUUID),
+		).Exec()
+
+		if execErr != nil {
+			log.Printf("❌ Erreur décrémentation stock pour %s: %v", item.ProductID, execErr)
+			return execErr
+		}
+
+		log.Printf("📦 Stock décrémenté: %s (-%d)", item.Name, item.Quantity)
+	}
+
+	return nil
 }
