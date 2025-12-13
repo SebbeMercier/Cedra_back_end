@@ -6,11 +6,14 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
+	adminHandlers "cedra_back_end/internal/handlers/admin"
 	"cedra_back_end/internal/handlers/company"
 	pa "cedra_back_end/internal/handlers/payement"
 	"cedra_back_end/internal/handlers/product"
 	"cedra_back_end/internal/handlers/user"
 	"cedra_back_end/internal/middleware"
+	"cedra_back_end/internal/models"
+	"cedra_back_end/internal/utils"
 )
 
 func RegisterRoutes(router *gin.Engine) {
@@ -48,6 +51,14 @@ func RegisterRoutes(router *gin.Engine) {
 
 		auth.GET("/:provider", user.BeginAuth)
 		auth.GET("/:provider/callback", user.CallbackAuth)
+
+		// ✅ Nouvelles routes JWT + Redis
+		auth.POST("/refresh", user.RefreshAccessToken)                                                          // Renouveler access token
+		auth.POST("/logout", middleware.AuthRequired(), user.Logout)                                            // Logout (révocation)
+		auth.GET("/sessions", middleware.AuthRequired(), user.GetActiveSessions)                                // Voir sessions actives
+		auth.DELETE("/sessions/:user_id", middleware.AuthRequired(), user.RevokeSession)                        // Révoquer sessions (admin)
+		auth.POST("/ban/:user_id", middleware.AuthRequired(), middleware.RequireAdmin, user.BanUserAccount)     // Bannir user
+		auth.DELETE("/ban/:user_id", middleware.AuthRequired(), middleware.RequireAdmin, user.UnbanUserAccount) // Débannir user
 	}
 
 	addresses := api.Group("/addresses", middleware.AuthRequired())
@@ -85,10 +96,13 @@ func RegisterRoutes(router *gin.Engine) {
 		products.GET("/best-sellers", product.GetBestSellers)
 		products.GET("/:id", product.GetProductFull)
 
-		// 🔹 Routes admin (création)
-		products.POST("", middleware.AuthRequired(), middleware.RequireAdmin, product.CreateProduct)
-		products.PUT("/:id", middleware.AuthRequired(), middleware.RequireAdmin, product.UpdateProduct)
-		products.DELETE("/:id", middleware.AuthRequired(), middleware.RequireAdmin, product.DeleteProduct)
+		// 🔹 Routes admin avec permissions granulaires
+		products.POST("", middleware.AuthRequired(), middleware.RequirePermission(models.PERM_PRODUCTS_CREATE),
+			middleware.AuditCriticalActions(utils.ACTION_PRODUCT_CREATE, utils.RESOURCE_PRODUCT), product.CreateProduct)
+		products.PUT("/:id", middleware.AuthRequired(), middleware.RequirePermission(models.PERM_PRODUCTS_EDIT),
+			middleware.AuditPriceChanges(), middleware.AuditCriticalActions(utils.ACTION_PRODUCT_UPDATE, utils.RESOURCE_PRODUCT), product.UpdateProduct)
+		products.DELETE("/:id", middleware.AuthRequired(), middleware.RequirePermission(models.PERM_PRODUCTS_DELETE),
+			middleware.AuditCriticalActions(utils.ACTION_PRODUCT_DELETE, utils.RESOURCE_PRODUCT), product.DeleteProduct)
 	}
 
 	categories := api.Group("/categories")
@@ -119,9 +133,9 @@ func RegisterRoutes(router *gin.Engine) {
 	payments := api.Group("/payments")
 	{
 		payments.POST("/create-intent", middleware.AuthRequired(), pa.CreatePaymentIntent)
-		payments.POST("/checkout", middleware.AuthRequired(), pa.Checkout)             // ✅ Nouveau endpoint checkout
-		payments.GET("/validate-coupon", middleware.AuthRequired(), pa.ValidateCoupon) // ✅ Validation coupon
-		payments.POST("/webhook", pa.StripeWebhook)                                    // ⚠️ Pas d'auth (Stripe vérifie la signature)
+		payments.POST("/checkout", middleware.AuthRequired(), pa.Checkout)                     // ✅ Nouveau endpoint checkout
+		payments.GET("/validate-coupon", middleware.AuthRequired(), pa.ValidateCouponDetailed) // ✅ Validation coupon détaillée
+		payments.POST("/webhook", pa.StripeWebhook)                                            // ⚠️ Pas d'auth (Stripe vérifie la signature)
 	}
 
 	// ✅ Routes admin pour la gestion des commandes
@@ -179,6 +193,66 @@ func RegisterRoutes(router *gin.Engine) {
 		dashboard.GET("/stats", pa.GetDashboardStats)
 		dashboard.GET("/recent-orders", pa.GetRecentOrders)
 		dashboard.GET("/top-products", pa.GetTopProducts)
+	}
+
+	// ✅ Coupons Management avec permissions granulaires
+	coupons := api.Group("/coupons", middleware.AuthRequired())
+	{
+		coupons.POST("", middleware.RequirePermission(models.PERM_COUPONS_CREATE),
+			middleware.AuditCriticalActions(utils.ACTION_COUPON_CREATE, utils.RESOURCE_COUPON), pa.CreateCoupon)
+		coupons.GET("", middleware.RequirePermission(models.PERM_COUPONS_VIEW), pa.GetAllCoupons)
+		coupons.PUT("/:id", middleware.RequirePermission(models.PERM_COUPONS_EDIT),
+			middleware.AuditCriticalActions(utils.ACTION_COUPON_UPDATE, utils.RESOURCE_COUPON), pa.UpdateCoupon)
+		coupons.DELETE("/:id", middleware.RequirePermission(models.PERM_COUPONS_DELETE),
+			middleware.AuditCriticalActions(utils.ACTION_COUPON_DELETE, utils.RESOURCE_COUPON), pa.DeleteCoupon)
+	}
+
+	// ✅ Inventory Management avec permissions granulaires
+	inventory := api.Group("/inventory", middleware.AuthRequired())
+	{
+		inventory.PUT("/products/:id/stock", middleware.RequirePermission(models.PERM_INVENTORY_EDIT),
+			middleware.AuditCriticalActions(utils.ACTION_STOCK_UPDATE, utils.RESOURCE_INVENTORY), product.UpdateStock)
+		inventory.GET("/movements", middleware.RequirePermission(models.PERM_INVENTORY_VIEW), product.GetStockMovements)
+		inventory.GET("/alerts", middleware.RequirePermission(models.PERM_INVENTORY_ALERTS), product.GetLowStockAlerts)
+		inventory.PUT("/alerts/:id/resolve", middleware.RequirePermission(models.PERM_INVENTORY_ALERTS), product.ResolveStockAlert)
+		inventory.GET("/stats", middleware.RequirePermission(models.PERM_INVENTORY_VIEW), product.GetInventoryStats)
+	}
+
+	// ✅ Product Variants avec permissions granulaires
+	variants := api.Group("/products/:id/variants", middleware.AuthRequired())
+	{
+		variants.POST("", middleware.RequirePermission(models.PERM_PRODUCTS_CREATE), product.CreateProductVariant)
+		variants.GET("", product.GetProductVariants)
+		variants.PUT("/:variant_id", middleware.RequirePermission(models.PERM_PRODUCTS_EDIT), product.UpdateProductVariant)
+		variants.DELETE("/:variant_id", middleware.RequirePermission(models.PERM_PRODUCTS_DELETE), product.DeleteProductVariant)
+	}
+
+	// ✅ SKU Lookup
+	api.GET("/sku/:sku", product.GetVariantBySKU)
+
+	// ✅ Administration des Rôles et Permissions
+	admin := api.Group("/admin", middleware.AuthRequired())
+	{
+		// Gestion des rôles
+		roles := admin.Group("/roles", middleware.RequirePermission(models.PERM_ADMIN_ROLES))
+		{
+			roles.GET("", adminHandlers.GetAllRoles)
+			roles.POST("", adminHandlers.CreateRole)
+			roles.POST("/assign", adminHandlers.AssignRoleToUser)
+			roles.DELETE("/users/:user_id/roles/:role_id", adminHandlers.RevokeRoleFromUser)
+			roles.GET("/users/:user_id", adminHandlers.GetUserRoles)
+		}
+
+		// Mes permissions
+		admin.GET("/my-permissions", adminHandlers.GetMyPermissions)
+
+		// Logs d'audit
+		audit := admin.Group("/audit", middleware.RequirePermission(models.PERM_ADMIN_LOGS))
+		{
+			audit.GET("/logs", adminHandlers.GetAuditLogs)
+			audit.GET("/logs/:resource/:resource_id", adminHandlers.GetAuditLogsByResource)
+			audit.GET("/stats", adminHandlers.GetAuditStats)
+		}
 	}
 
 	router.GET("/health", func(c *gin.Context) {

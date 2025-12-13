@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cedra_back_end/internal/cache"
 	"cedra_back_end/internal/config"
 	"cedra_back_end/internal/database"
 	"cedra_back_end/internal/routes"
@@ -34,6 +35,11 @@ func main() {
 
 	// ✅ Initialiser les prepared statements pour améliorer les performances
 	database.InitPreparedStatements()
+
+	// ✅ Initialiser Redis pour JWT + sessions
+	if err := cache.InitRedis(); err != nil {
+		log.Fatalf("❌ Erreur initialisation Redis: %v", err)
+	}
 
 	// ✅ Pré-chauffer le cache Redis
 	warmupRedisCache()

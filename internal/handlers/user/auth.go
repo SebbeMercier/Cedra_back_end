@@ -278,7 +278,13 @@ func Login(c *gin.Context) {
 		IsCompanyAdmin: &isCompanyAdmin,
 	}
 
-	token := generateJWT(user)
+	// ✅ Générer access token + refresh token
+	authTokens, err := generateJWTWithRefresh(user)
+	if err != nil {
+		log.Printf("❌ Erreur génération tokens: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Erreur génération tokens"})
+		return
+	}
 
 	// ✅ OPTIMISATION 4: Mise en cache parallèle (password + user)
 	go func() {
@@ -289,7 +295,11 @@ func Login(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusOK, gin.H{
-		"token":          token,
+		"access_token":   authTokens.AccessToken,
+		"refresh_token":  authTokens.RefreshToken,
+		"expires_in":     authTokens.ExpiresIn,
+		"token_type":     authTokens.TokenType,
+		"token":          authTokens.AccessToken, // ✅ Compatibilité avec ancien code
 		"userId":         user.ID,
 		"email":          user.Email,
 		"name":           user.Name,
@@ -800,18 +810,35 @@ func generateJWT(user models.User) string {
 		isAdmin = *user.IsCompanyAdmin
 	}
 
-	claims := jwt.MapClaims{
-		"user_id":        user.ID,
-		"email":          user.Email,
-		"role":           user.Role,
-		"isCompanyAdmin": isAdmin,
-		"exp":            time.Now().Add(24 * time.Hour).Unix(),
+	// ✅ Utiliser la nouvelle fonction avec access + refresh tokens
+	response, err := GenerateAuthTokens(user.ID, user.Email, user.Role, isAdmin)
+	if err != nil {
+		log.Printf("❌ Erreur génération tokens: %v", err)
+		// Fallback sur l'ancien système si erreur
+		claims := jwt.MapClaims{
+			"user_id":        user.ID,
+			"email":          user.Email,
+			"role":           user.Role,
+			"isCompanyAdmin": isAdmin,
+			"exp":            time.Now().Add(24 * time.Hour).Unix(),
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		tokenString, _ := token.SignedString(jwtSecret)
+		return tokenString
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, _ := token.SignedString(jwtSecret)
+	// Retourner seulement l'access token pour compatibilité
+	return response.AccessToken
+}
 
-	return tokenString
+// generateJWTWithRefresh génère access + refresh tokens et retourne les deux
+func generateJWTWithRefresh(user models.User) (*LoginResponse, error) {
+	isAdmin := false
+	if user.IsCompanyAdmin != nil {
+		isAdmin = *user.IsCompanyAdmin
+	}
+
+	return GenerateAuthTokens(user.ID, user.Email, user.Role, isAdmin)
 }
 
 // ================== HANDLERS SUPPLÉMENTAIRES ==================

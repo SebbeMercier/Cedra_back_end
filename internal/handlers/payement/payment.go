@@ -6,9 +6,11 @@ import (
 	"cedra_back_end/internal/utils"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -129,6 +131,7 @@ func handleStripeEvent(event stripe.Event) {
 	userID := pi.Metadata["user_id"]
 	userEmail := pi.Metadata["email"]
 	cartData := pi.Metadata["cart"] // ✅ Récupère depuis Stripe
+	couponCode := pi.Metadata["coupon_code"]
 
 	if userID == "" || userEmail == "" || cartData == "" {
 		log.Println("⚠️ Métadonnées incomplètes")
@@ -210,6 +213,15 @@ func handleStripeEvent(event stripe.Event) {
 		log.Println("✅ Stock décrémenté avec succès")
 	}
 
+	// ✅ Enregistrer l'utilisation du coupon si présent
+	if couponCode != "" {
+		if err := recordCouponUsage(couponCode, userID, orderID); err != nil {
+			log.Printf("⚠️ Erreur enregistrement coupon: %v", err)
+		} else {
+			log.Printf("✅ Utilisation coupon enregistrée: %s", couponCode)
+		}
+	}
+
 	// Créer l'objet order pour les fonctions utils
 	order := models.Order{
 		ID:              orderID,
@@ -274,6 +286,42 @@ func decrementStock(orderItems []models.OrderItem) error {
 		}
 
 		log.Printf("📦 Stock décrémenté: %s (-%d)", item.Name, item.Quantity)
+	}
+
+	return nil
+}
+
+// recordCouponUsage enregistre l'utilisation d'un coupon après paiement réussi
+func recordCouponUsage(couponCode, userID string, orderID gocql.UUID) error {
+	// Récupérer l'ID du coupon
+	var couponID gocql.UUID
+	query := `SELECT id FROM ks_orders.coupons WHERE code = ? LIMIT 1`
+	ordersSession, err := database.GetOrdersSession()
+	if err != nil {
+		return fmt.Errorf("erreur connexion base de données: %v", err)
+	}
+
+	if err := ordersSession.Query(query, strings.ToUpper(couponCode)).Scan(&couponID); err != nil {
+		return fmt.Errorf("coupon non trouvé: %v", err)
+	}
+
+	// Enregistrer l'utilisation
+	usageID := gocql.TimeUUID()
+	insertUsageQuery := `
+		INSERT INTO ks_orders.coupon_usage (id, coupon_id, user_id, order_id, used_at)
+		VALUES (?, ?, ?, ?, ?)
+	`
+
+	if err := ordersSession.Query(insertUsageQuery,
+		usageID, couponID, userID, orderID, time.Now(),
+	).Exec(); err != nil {
+		return fmt.Errorf("erreur insertion usage: %v", err)
+	}
+
+	// Incrémenter le compteur d'utilisation du coupon
+	updateCountQuery := `UPDATE ks_orders.coupons SET used_count = used_count + 1 WHERE id = ?`
+	if err := ordersSession.Query(updateCountQuery, couponID).Exec(); err != nil {
+		log.Printf("⚠️ Erreur mise à jour compteur coupon: %v", err)
 	}
 
 	return nil

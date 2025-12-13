@@ -1,18 +1,15 @@
 package middleware
 
 import (
-	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
-	"time"
+
+	"cedra_back_end/internal/cache"
+	"cedra_back_end/internal/utils"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 )
-
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 func AuthRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -37,13 +34,8 @@ func AuthRequired() gin.HandlerFunc {
 		tokenString := parts[1]
 		log.Printf("🎫 Token (20 premiers chars): %s...", tokenString[:min(20, len(tokenString))])
 
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("méthode de signature inattendue: %v", token.Header["alg"])
-			}
-			return jwtSecret, nil
-		})
-
+		// Parser le token avec les nouveaux claims
+		claims, err := utils.ParseAccessToken(tokenString)
 		if err != nil {
 			log.Printf("❌ Erreur parsing JWT: %v", err)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token invalide"})
@@ -51,51 +43,36 @@ func AuthRequired() gin.HandlerFunc {
 			return
 		}
 
-		if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-			log.Printf("✅ Claims JWT: %+v", claims)
+		log.Printf("✅ Claims JWT: %+v", claims)
 
-			// Vérifier l'expiration
-			if exp, ok := claims["exp"].(float64); ok {
-				if time.Now().Unix() > int64(exp) {
-					log.Println("❌ Token expiré")
-					c.JSON(http.StatusUnauthorized, gin.H{"error": "Token expiré"})
-					c.Abort()
-					return
-				}
-			}
-
-			userID, ok := claims["user_id"].(string)
-			if !ok {
-				log.Printf("❌ user_id manquant ou invalide dans claims: %+v", claims)
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "user_id manquant"})
-				c.Abort()
-				return
-			}
-
-			log.Printf("✅ user_id extrait: %s", userID)
-
-			// ✅ Mettre les claims dans le context Gin
-			c.Set("user_id", userID)
-			c.Set("email", claims["email"])
-			c.Set("role", claims["role"])
-
-			// ✅ AJOUT CRITIQUE : Extraire isCompanyAdmin et le mettre dans le context
-			if isCompanyAdmin, ok := claims["isCompanyAdmin"].(bool); ok {
-				c.Set("isCompanyAdmin", isCompanyAdmin)
-				log.Printf("✅ isCompanyAdmin extrait et mis dans context: %v", isCompanyAdmin)
-			} else {
-				// Par défaut false si absent
-				c.Set("isCompanyAdmin", false)
-				log.Printf("⚠️ isCompanyAdmin non trouvé dans claims, défini à false par défaut")
-			}
-
-			c.Next()
-		} else {
-			log.Println("❌ Claims invalides")
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token invalide"})
+		// ✅ SÉCURITÉ 1: Vérifier si le token est blacklisté (révoqué)
+		if cache.IsTokenBlacklisted(claims.TokenID) {
+			log.Printf("❌ Token blacklisté (révoqué): %s", claims.TokenID)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token révoqué"})
 			c.Abort()
 			return
 		}
+
+		// ✅ SÉCURITÉ 2: Vérifier si l'utilisateur est banni
+		if cache.IsUserBanned(claims.UserID) {
+			log.Printf("❌ Utilisateur banni: %s", claims.UserID)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Compte banni"})
+			c.Abort()
+			return
+		}
+
+		log.Printf("✅ user_id extrait: %s", claims.UserID)
+
+		// ✅ Mettre les claims dans le context Gin
+		c.Set("user_id", claims.UserID)
+		c.Set("email", claims.Email)
+		c.Set("role", claims.Role)
+		c.Set("isCompanyAdmin", claims.IsCompanyAdmin)
+		c.Set("token_id", claims.TokenID) // Pour blacklist lors du logout
+
+		log.Printf("✅ isCompanyAdmin: %v", claims.IsCompanyAdmin)
+
+		c.Next()
 	}
 }
 

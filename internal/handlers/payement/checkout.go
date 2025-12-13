@@ -123,25 +123,19 @@ func Checkout(c *gin.Context) {
 	// ✅ 5. Valider et appliquer le coupon (si fourni)
 	var discountAmount float64
 	var couponCode string
+	var couponType string
 
 	if req.CouponCode != "" {
-		// Rechercher le promotion code
-		params := &stripe.PromotionCodeListParams{}
-		params.Filters.AddFilter("code", "", req.CouponCode)
-		params.Filters.AddFilter("active", "", "true")
-
-		iter := promotioncode.List(params)
-		if iter.Next() {
-			promo := iter.PromotionCode()
-			couponCode = promo.Code
-
-			// Note: Dans Stripe v83, on ne peut pas accéder directement au Coupon
-			// On stocke juste le code pour référence
-			log.Printf("✅ Coupon trouvé: %s", req.CouponCode)
-		} else {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Code promo invalide ou expiré"})
+		validation := validateCoupon(req.CouponCode, totalPrice, userID)
+		if !validation.IsValid {
+			c.JSON(http.StatusBadRequest, gin.H{"error": validation.ErrorMessage})
 			return
 		}
+
+		discountAmount = validation.Discount
+		couponCode = validation.Code
+		couponType = validation.Type
+		log.Printf("✅ Coupon appliqué: %s (%.2f€ de réduction)", couponCode, discountAmount)
 	}
 
 	finalPrice := totalPrice - discountAmount
@@ -167,6 +161,8 @@ func Checkout(c *gin.Context) {
 	// Ajouter le coupon dans les métadonnées si présent
 	if couponCode != "" {
 		metadata["coupon_code"] = couponCode
+		metadata["coupon_type"] = couponType
+		metadata["discount_amount"] = string(rune(int(discountAmount * 100)))
 	}
 
 	params := &stripe.PaymentIntentParams{

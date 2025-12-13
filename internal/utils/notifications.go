@@ -259,51 +259,6 @@ func SendRefundRequestEmail(userEmail string, orderID string, reason string) err
 	return SendConfirmationEmail(userEmail, subject, html, nil)
 }
 
-// SendWelcomeEmail envoie un email de bienvenue
-func SendWelcomeEmail(userEmail, userName string) error {
-	subject := "🎉 Bienvenue sur Cedra !"
-
-	html := fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-        .content { background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }
-        .cta-button { display: inline-block; padding: 15px 30px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin: 20px 0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🎉 Bienvenue %s !</h1>
-        </div>
-        <div class="content">
-            <p>Merci de vous être inscrit sur Cedra, votre nouvelle destination shopping en ligne.</p>
-            
-            <p>Découvrez dès maintenant notre sélection de produits et profitez de nos offres exclusives !</p>
-            
-            <a href="#" class="cta-button">Commencer mes achats</a>
-            
-            <h3>Avantages membres :</h3>
-            <ul>
-                <li>✅ Livraison gratuite dès 50€</li>
-                <li>✅ Retours gratuits sous 30 jours</li>
-                <li>✅ Codes promo exclusifs</li>
-                <li>✅ Support client 7j/7</li>
-            </ul>
-        </div>
-    </div>
-</body>
-</html>
-`, userName)
-
-	return SendConfirmationEmail(userEmail, subject, html, nil)
-}
-
 // SendRefundApprovedEmail envoie un email de remboursement approuvé
 func SendRefundApprovedEmail(userEmail string, orderID string, amount float64) error {
 	subject := "✅ Remboursement approuvé - Cedra"

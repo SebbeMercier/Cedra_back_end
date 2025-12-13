@@ -14,7 +14,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/markbates/goth v1.82.0
 	github.com/minio/minio-go/v7 v7.0.95
-	github.com/redis/go-redis/v9 v9.14.0
+	github.com/redis/go-redis/v9 v9.17.2
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v83 v83.0.1
 	github.com/wneessen/go-mail v0.7.2
